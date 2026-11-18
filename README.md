@@ -139,6 +139,8 @@ python -m venv .venv
 5. When the subtitles look right, press **Save as .srt** (above the subtitle list) and pick where to put the
    file. It starts in the **Save .srt to** folder, or beside the clip if that's blank. This is the only time a
    `.srt` lands in your project.
+   Synced a batch? **Save all as .srt** (next to **Stop**) saves every synced clip's `.srt` at once, beside each
+   clip, or all in the **Save .srt to** folder if one is set. No dialog per clip.
 
 The **status bar** at the bottom always says what the app is doing: Standing by (yellow), Clips loaded / Ready
 (orange), Running with a timer, then Finished in m:ss (green), or Stopped / Error (red; click **Details…** for what

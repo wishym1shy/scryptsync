@@ -643,9 +643,65 @@ def _natural_dur(w: Wd) -> float:
     return min(0.9, max(0.12, 0.10 + 0.06 * n))
 
 
+_SQUASHED = 0.05        # a spoken word shorter than this (s) has no real timing of its own
+
+
+def _spoken_dur(text: str) -> float:
+    """About how long a spoken word takes to say (same scale as _natural_dur)."""
+    n = sum(ch.isalnum() for ch in text) or 3
+    return min(0.9, max(0.12, 0.10 + 0.06 * n))
+
+
+def _untangle_stretched(asr: list) -> list:
+    """Undo the speech model stretching one word over speech it couldn't make out.
+
+    Next to a stretch it can't hear (a quiet phone call, a second speaker), the model sometimes gives the
+    word beside it seconds of time (a two-letter word lasting 4 s) and squeezes the words after it into zero
+    length at the far end. The cue then stays up through the whole stretch, and script words that were
+    never heard there are crushed into what is left. A word that lasts more than 3x its usual length
+    (and over 1 s) is cut back to its usual length on the side away from its phrase, and the
+    zero-length words piled at the far end are put back next to it. Returns a new list."""
+    out = [AsrWord(w.text, w.start, w.end, w.prob) for w in asr]
+    n = len(out)
+    for i, w in enumerate(out):
+        nat = _spoken_dur(w.text)
+        if w.end - w.start <= max(1.0, 3 * nat):
+            continue
+        # words squeezed to nothing at either end of the stretch
+        j = i + 1
+        while j < n and out[j].end - out[j].start < _SQUASHED and out[j].start - w.end < _SQUASHED:
+            j += 1
+        after = out[i + 1:j]
+        k = i
+        while k > 0 and out[k - 1].end - out[k - 1].start < _SQUASHED and w.start - out[k - 1].end < _SQUASHED:
+            k -= 1
+        before = out[k:i]
+        gap_before = w.start - out[i - 1].end if i > 0 else float("inf")
+        gap_after = out[i + 1].start - w.end if i + 1 < n else float("inf")
+        keep_start = bool(after) or (not before and gap_before <= gap_after)
+        if keep_start:                  # it belongs to the words before it: the end is the stretched side
+            limit = w.end
+            w.end = w.start + nat
+            t = w.end
+            for x in after:
+                d = _spoken_dur(x.text)
+                x.start, x.end = min(t, limit), min(t + d, limit)
+                t += d
+        else:                           # it belongs to the words after it: the start is the stretched side
+            limit = w.start
+            w.start = w.end - nat
+            t = w.start
+            for x in reversed(before):
+                d = _spoken_dur(x.text)
+                x.start, x.end = max(t - d, limit), max(t, limit)
+                t -= d
+    return out
+
+
 def align_script(lines: list, asr: list, audio_duration: float):
     """lines: cleaned script lines. asr: list[AsrWord].
     Returns (words, off_script) where words is list[Wd] with times and confidence."""
+    asr = _untangle_stretched(asr)
     # ---- script words
     words: list = []
     for li, line in enumerate(lines):

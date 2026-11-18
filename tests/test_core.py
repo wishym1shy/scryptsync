@@ -44,6 +44,38 @@ def test_basic():
     for a,b in zip(res.cues, res.cues[1:]): assert a.end <= b.start, (a,b)
     assert res.cues[0].start >= 0.067 - 1e-9
 
+def test_stretched_word_does_not_crush_unheard_lines():
+    # The model can't make out a quiet second speaker: it stretches the word before them over their
+    # whole turn (one word 4 s long) and squeezes the next word into zero length at the far end.
+    # The line before must not stay up through the turn, and the never-heard lines must get the turn's
+    # time, not be crushed into what is left after the stretched word.
+    script = ("Tell me which one\n"
+              "The blue kettle sits on the green shelf by the window\n"
+              "Seven lanterns hang above the quiet garden path tonight\n"
+              "Our neighbour paints wooden birds every single morning\n"
+              "The river runs past the old mill toward the sea")
+    a, _, _ = speak(["tell me"], t=1.0)
+    t = a[-1].end + 0.03
+    a += [AsrWord("which", t, t + 4.0), AsrWord("one", t + 4.0, t + 4.0)]       # 4 s "which", 0 s "one"
+    caller_end = t + 8.0                                                           # second speaker till here
+    b, _, end = speak(["the river runs past the old mill toward the sea"], t=caller_end)
+    s = Settings(max_chars=18, max_words=4, include_unheard=True)
+    res = sync_words(parse_script(script, s), a + b, end, s)
+    first = [c for c in res.cues if c.line_no == 0]
+    assert first[-1].end < t + 1.0, first[-1]                                    # not held for 4 s
+    unheard = [c for c in res.cues if c.line_no in (1, 2, 3)]
+    assert unheard[0].start < t + 1.0, unheard[0]                                # starts with the caller
+    span = unheard[-1].end - unheard[0].start
+    assert span > 6.0, span                                                      # spread over the turn
+    assert min(c.end - c.start for c in unheard) >= 0.2, unheard                 # no few-frame flashes
+    # a word that is just said slowly (under 3x its usual length) is left alone
+    slow = [AsrWord("oh", 1.0, 1.6), AsrWord("wonderful", 1.6, 3.2)]
+    from scriptsync_core import _untangle_stretched
+    assert [(w.start, w.end) for w in _untangle_stretched(slow)] == [(1.0, 1.6), (1.6, 3.2)]
+    # a word stretched back over a pause before it keeps its end (the start is the stretched side)
+    late = _untangle_stretched([AsrWord("hi", 0.5, 0.7), AsrWord("there", 3.0, 7.0), AsrWord("folks", 7.0, 7.4)])
+    assert late[1].end == 7.0 and late[1].start > 6.0, late[1]
+
 def test_srt_format():
     c = [Cue(1, 0.067, 1.5, "Hi", 1, "ok", [], 0), Cue(2, 3661.0012, 3662.25, "There", 1, "ok", [], 1)]
     t = make_srt(c)

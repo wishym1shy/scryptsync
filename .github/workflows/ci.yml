@@ -19,6 +19,7 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15          # they take ~1 min; a hung runner fails instead of waiting for GitHub's 6 h limit
     strategy:
       fail-fast: false
       matrix:
@@ -101,14 +102,26 @@ jobs:
   gui:
     name: GUI smoke test (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 10          # ~30 s normally; a package mirror that hangs must not hold the PR for 25 min
     steps:
       - uses: actions/checkout@v4
-      - name: Install tkinter, a virtual display and tools to make a test clip
+      - name: Install tkinter, a virtual display and ffmpeg (only what the runner doesn't already have)
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk xvfb ffmpeg espeak-ng imagemagick
-      - name: Make a synthetic test clip
-        run: python3 tests/make_test_clip.py "$RUNNER_TEMP/clip"
+          # apt-get update is most of this job's time and where the mirror hangs: skip it when nothing is missing
+          missing=""
+          python3 -c "import tkinter" 2>/dev/null || missing="$missing python3-tk"
+          command -v xvfb-run >/dev/null || missing="$missing xvfb"
+          command -v ffmpeg >/dev/null || missing="$missing ffmpeg"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y --no-install-recommends $missing
+          else
+            echo "everything is already on the runner"
+          fi
+      - name: Make a synthetic test clip (silent; the stand-in speech model needs no real speech)
+        run: python3 tests/make_test_clip.py --silent "$RUNNER_TEMP/clip"
       - name: Sync it through the real window (speech model replaced by a stand-in)
         env:
           SCRIPTSYNC_ASR_PLUGIN: tests/fake_plugin.py

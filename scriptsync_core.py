@@ -1551,10 +1551,12 @@ def _video_fps(ffmpeg_info: str) -> Optional[float]:
 
 
 def _normalize_fps(f: float) -> float:
-    """ffmpeg prints rounded rates (23.98, 29.97): map them back to the exact standard rate."""
-    for std in _STANDARD_FPS:
-        if abs(f - std) < 0.05:          # also catches phone footage that reports e.g. 29.98 or 30.02
-            return std
+    """ffmpeg prints rounded rates (23.98, 29.97): map them back to the exact standard rate.
+    The nearest one wins: 30 and 29.97 are only 0.03 apart, so taking the first rate within reach turned
+    every 30 fps clip into 29.97 (and 24 into 23.976, 60 into 59.94)."""
+    std = min(_STANDARD_FPS, key=lambda s: abs(f - s))
+    if abs(f - std) < 0.05:              # also catches phone footage that reports e.g. 29.98 or 30.02
+        return std
     return round(f, 3)
 
 

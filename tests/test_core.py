@@ -746,6 +746,87 @@ def test_variable_frame_rate_uses_the_base_rate():
     assert _video_fps("  Stream #0:0: Audio: aac, 48000 Hz") is None
 
 
+def test_every_user_error_has_a_documented_code():
+    """Bug reports should say exactly what happened: every SyncError the engine raises has an SS- code that
+    is in ERROR_CODES (and so in the README's troubleshooting table), and the code is shown with it."""
+    import ast, re
+    import scriptsync_core as core
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    tree = ast.parse(open(os.path.join(root, "scriptsync_core.py"), encoding="utf-8").read())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "SyncError"]
+    assert len(calls) >= 15, len(calls)
+    for c in calls:
+        assert len(c.args) == 2 and isinstance(c.args[1], ast.Constant), f"SyncError without a code, line {c.lineno}"
+        assert c.args[1].value in core.ERROR_CODES, (c.lineno, c.args[1].value)
+    src = open(os.path.join(root, "scriptsync_core.py"), encoding="utf-8").read()
+    for code in set(re.findall(r"\[(SS-\d{3})\]", src)):          # codes on warnings
+        assert code in core.ERROR_CODES, code
+    readme = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    for code in core.ERROR_CODES:
+        assert code in readme, f"{code} is not explained in the README"
+    assert str(core.SyncError("Can't find the clip", "SS-201")) == "Can't find the clip [SS-201]"
+
+
+def test_unusable_gpu_is_tried_once_per_session_and_reported():
+    """An NVIDIA card CTranslate2 can see but not use (e.g. cuBLAS missing): before, every clip loaded the
+    model onto the GPU, failed and fell back to the CPU, silently. Now: one try per session, and each result
+    says why it ran on the CPU."""
+    import types
+    import scriptsync_core as core
+    loads = {"cuda": 0, "cpu": 0}
+
+    class Model:
+        def __init__(self, name, device="cpu", compute_type="", download_root=None):
+            self.device = device
+            loads[device] += 1
+
+        def transcribe(self, audio, **kw):
+            def segs():
+                if self.device == "cuda":
+                    raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+                w = types.SimpleNamespace(word="hello", start=0.5, end=0.9, probability=0.9)
+                yield types.SimpleNamespace(words=[w], end=0.9)
+            return segs(), types.SimpleNamespace(language="en")
+
+    fake_fw = types.ModuleType("faster_whisper"); fake_fw.WhisperModel = Model
+    fake_ct2 = types.ModuleType("ctranslate2"); fake_ct2.get_cuda_device_count = lambda: 1
+    saved = {k: sys.modules.get(k) for k in ("faster_whisper", "ctranslate2")}
+    real_decode, real_cache = core.decode_audio, dict(core._model_cache)
+    sys.modules.update(faster_whisper=fake_fw, ctranslate2=fake_ct2)
+    core.decode_audio = lambda path: [0.0] * 16000 * 3
+    core._gpu_problem = None
+    core._model_cache.clear()
+    try:
+        for _ in range(3):                                      # three clips in one session
+            info = {}
+            words, dur, lang = core._whisper_transcribe("clip.mp4", Settings(), "", lambda *a: None, None, info)
+            assert [w.text for w in words] == ["hello"] and info["device"] == "cpu"
+            assert "cublas64_12.dll" in info["gpu_problem"], info
+        assert loads == {"cuda": 1, "cpu": 1}, loads
+        assert "cublas64_12.dll" in core.system_info()["gpu this session"]
+    finally:
+        core.decode_audio = real_decode
+        core._gpu_problem = None
+        core._model_cache.clear(); core._model_cache.update(real_cache)
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def test_gpu_and_download_problems_are_explained():
+    import scriptsync_core as core
+    assert "cublas64_12.dll" in core._gpu_reason(RuntimeError("Library cublas64_12.dll is not found"))
+    assert "cuDNN" in core._gpu_reason(RuntimeError("Could not load library cudnn_ops64_9.dll"))
+    assert "newer" in core._gpu_reason(RuntimeError("CUDA failed with error no kernel image is available"))
+    assert "memory" in core._gpu_reason(RuntimeError("CUDA failed with error out of memory"))
+    Hub = type("LocalEntryNotFoundError", (Exception,), {"__module__": "huggingface_hub.errors"})
+    assert core._is_download_error(Hub("Cannot find an appropriate cached snapshot"))
+    assert core._is_download_error(ConnectionError("no route"))
+    assert not core._is_download_error(RuntimeError("CUDA failed"))
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

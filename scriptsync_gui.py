@@ -1412,7 +1412,8 @@ class App(tk.Tk):
             except core.SyncError as ex:
                 self.q.put(("row", e["iid"], f"Error: {ex}", None))
             except Exception as ex:  # unexpected; run_job has already logged the traceback
-                self.q.put(("row", e["iid"], f"Error: {type(ex).__name__}: {ex} (details in the log)", None))
+                self.q.put(("row", e["iid"], f"Error: {type(ex).__name__}: {ex} [SS-900] - please report it: "
+                                             "More options > Troubleshooting > Copy diagnostic info", None))
         self.q.put(("finished", n))
 
     def _poll(self):

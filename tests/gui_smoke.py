@@ -23,6 +23,20 @@ rows = [app.tree.item(i, "values") for i in app.tree.get_children()]
 print("rows:", rows)
 n_cues = len(app.ctree.get_children())
 print("cues shown:", n_cues, "|", app.summary.cget("text"))
+# a second sync in the same session (users reported having to restart the app between sessions)
+def srts():
+    return sorted(f for f in os.listdir(T) if f.endswith(".srt") and "_synced_" in f)
+before = len(srts())
+app.start()
+t0 = time.time()
+for _ in range(5): app.update(); time.sleep(0.02)
+while app._busy() or not app.q.empty():
+    app.update(); time.sleep(0.02)
+    if time.time() - t0 > 60: print("TIMEOUT (second sync)"); break
+for _ in range(20): app.update(); time.sleep(0.02)
+rows2 = [app.tree.item(i, "values") for i in app.tree.get_children()]
+after = len(srts())
+print("second sync in the same session:", rows2[0][:2], f"| subtitle files {before} -> {after}")
 import shutil
 if shutil.which("import"):                     # ImageMagick, for a screenshot to look at
     os.system(f"import -window root {shot}")
@@ -31,4 +45,6 @@ app.destroy()
 assert any("Done" in " ".join(r) for r in rows), f"the clip with a script didn't finish: {rows}"
 assert any("Needs a script" in " ".join(r) for r in rows), f"the clip without a script should wait: {rows}"
 assert n_cues > 0, "no subtitles shown in the Review list"
+assert any("Done" in " ".join(r) for r in rows2), f"a second sync in the same session didn't finish: {rows2}"
+assert after == before + 1, f"a second sync in the same session wrote no new subtitles ({before} -> {after})"
 print("GUI smoke test OK")

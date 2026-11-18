@@ -85,10 +85,12 @@ Before opening a PR, run all three. Currently the stress test reports a median w
 about 30 ms and well under 1% of words more than 1 s off; a change that makes this noticeably worse
 needs a reason in the PR description.
 
-GUI smoke test (Linux, needs `xvfb`, `python3-tk` and `ffmpeg`/`espeak-ng` to make a test clip):
+GUI smoke test (Linux, needs `xvfb`, `python3-tk` and `ffmpeg`; it also runs on Windows without `xvfb-run`).
+`--silent` makes the test clip without `espeak-ng` (the stand-in speech model doesn't listen); leave it out
+for a clip with real speech:
 
 ```
-python tests/make_test_clip.py /tmp/ss_test
+python tests/make_test_clip.py --silent /tmp/ss_test
 SCRIPTSYNC_ASR_PLUGIN=tests/fake_plugin.py xvfb-run -a python tests/gui_smoke.py /tmp/ss_test /tmp/ss.png
 ```
 

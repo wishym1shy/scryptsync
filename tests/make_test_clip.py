@@ -1,6 +1,9 @@
-"""Make a test clip with KNOWN line timings from espeak-ng speech. Usage: make_test_clip.py outdir"""
+"""Make a test clip with KNOWN line timings from espeak-ng speech. Usage: make_test_clip.py [--silent] outdir
+--silent: no espeak-ng; the lines get made-up timings over silence. Enough for the GUI smoke test, whose stand-in
+speech model (fake_plugin.py) replays truth.json instead of listening."""
 import subprocess, sys, os, wave, json
-out = sys.argv[1]; os.makedirs(out, exist_ok=True)
+silent = "--silent" in sys.argv[1:]
+out = [a for a in sys.argv[1:] if a != "--silent"][0]; os.makedirs(out, exist_ok=True)
 SPOKEN = [  # what is actually said
  "Hey guys welcome to Riverside Auto today",
  "Quick tip before we start",                       # ad-lib, not in script
@@ -15,9 +18,12 @@ segs, truth, t = [], [], 0.6
 silence = lambda sec: b"\x00\x00" * int(rate * sec)
 pcm = silence(0.6)
 for i, line in enumerate(SPOKEN):
-    wav = os.path.join(out, f"l{i}.wav")
-    subprocess.run(["espeak-ng", "-v", "en-us", "-s", "150", "-w", wav, line], check=True)
-    w = wave.open(wav); assert w.getframerate() == rate, w.getframerate(); data = w.readframes(w.getnframes()); w.close()
+    if silent:                                     # about espeak's pace (150 words a minute)
+        data = silence(0.4 * len(line.split()))
+    else:
+        wav = os.path.join(out, f"l{i}.wav")
+        subprocess.run(["espeak-ng", "-v", "en-us", "-s", "150", "-w", wav, line], check=True)
+        w = wave.open(wav); assert w.getframerate() == rate, w.getframerate(); data = w.readframes(w.getnframes()); w.close()
     dur = len(data) / 2 / rate
     truth.append({"text": line, "start": t, "end": t + dur})
     pcm += data + silence(0.7); t += dur + 0.7

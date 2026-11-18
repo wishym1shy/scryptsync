@@ -827,6 +827,28 @@ def test_gpu_and_download_problems_are_explained():
     assert not core._is_download_error(RuntimeError("CUDA failed"))
 
 
+def test_quiet_voice_is_raised_before_listening():
+    """A phone call (a quiet voice) next to a loud presenter wasn't heard at all by the speech model. The audio
+    it gets now has quiet stretches raised towards the rest, without moving anything in time."""
+    import subprocess, tempfile
+    if not find_ffmpeg():
+        print("    (skipped: no ffmpeg)"); return
+    try:
+        import numpy as np
+    except ImportError:
+        print("    (skipped: no numpy)"); return
+    ff, d = find_ffmpeg(), tempfile.mkdtemp()
+    clip = os.path.join(d, "loud_then_quiet.wav")       # 3 s of a tone near full volume, then 3 s of it 24 dB quieter
+    subprocess.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:r=16000:d=3", "-f", "lavfi",
+                    "-i", "sine=f=440:r=16000:d=3", "-filter_complex",
+                    "[0]volume=6[a];[1]volume=6,volume=-24dB[b];[a][b]concat=n=2:v=0:a=1", clip], check=True)
+    a = decode_audio(clip)
+    assert abs(len(a) / 16000 - 6.0) < 0.05, len(a) / 16000                 # nothing added or moved in time
+    rms = lambda x: float(np.sqrt(np.mean(np.square(x))))
+    loud, quiet = rms(a[16000:16000 * 2]), rms(a[16000 * 4:16000 * 5])
+    assert quiet > loud / 3, f"quiet part still {20 * np.log10(loud / quiet):.0f} dB below the loud part"
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

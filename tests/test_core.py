@@ -832,6 +832,20 @@ def test_variable_frame_rate_uses_the_base_rate():
     assert _video_fps("  Stream #0:0: Audio: aac, 48000 Hz") is None
 
 
+def test_whole_frame_rates_are_not_mistaken_for_ntsc_rates():
+    # 30 and 29.97 are 0.03 apart: a 30 fps clip was labelled 29.97 (and 24, 60 likewise), so subtitle
+    # changes were snapped to a frame grid that slides one frame every ~33 s against the clip's own frames.
+    from scriptsync_core import _normalize_fps, _video_fps
+    cases = {30: 30.0, 24: 24.0, 60: 60.0, 25: 25.0, 50: 50.0,
+             29.97: 30000 / 1001, 23.98: 24000 / 1001, 59.94: 60000 / 1001,
+             29.98: 30000 / 1001, 30.02: 30.0, 29.9984: 30.0, 24.01: 24.0, 12.5: 12.5}
+    for given, want in cases.items():
+        assert abs(_normalize_fps(given) - want) < 1e-9, (given, _normalize_fps(given), want)
+    line = "  Stream #0:0[0x1](und): Video: h264 (High), yuvj420p, 1080x1920, 14928 kb/s, {} fps, {} tbr, 90k tbn"
+    assert _video_fps(line.format("30", "30")) == 30.0                                 # a phone clip at 30
+    assert _video_fps(line.format("60", "60")) == 60.0
+
+
 def test_every_user_error_has_a_documented_code():
     """Bug reports should say exactly what happened: every SyncError the engine raises has an SS- code that
     is in ERROR_CODES (and so in the README's troubleshooting table), and the code is shown with it."""

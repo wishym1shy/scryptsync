@@ -45,6 +45,13 @@ app.tree.selection_set(first); app.update()
 saved = os.path.join(T, "saved_copy.srt")
 app.save_srt(dest=saved); app.update()
 print("save button:", save_text, "| saved:", os.path.exists(saved))
+# Save all as .srt: every synced clip's .srt beside its clip, in one press (blank "Save .srt to")
+save_all_state = str(app.btn_save_all.cget("state"))
+app.var_out.set("")
+app.save_all(); app.update()
+r = app.entries[first]["result"]
+beside = os.path.join(T, os.path.basename(r.srt_path))
+print("save all:", save_all_state, "| beside the clip:", os.path.exists(beside))
 import shutil
 if shutil.which("import"):                     # ImageMagick, for a screenshot to look at
     os.system(f"import -window root {shot}")
@@ -58,4 +65,7 @@ assert after == before + 1, f"a second sync in the same session wrote no new sub
 assert not left, f"a sync wrote files beside the clip: {left}"
 assert save_text == "Save as .srt", save_text
 assert os.path.exists(saved) and os.path.getsize(saved) > 0, "Save as .srt wrote nothing"
+assert save_all_state == "normal", f"Save all as .srt should be enabled after a sync ({save_all_state})"
+assert os.path.exists(beside) and open(beside, encoding="utf-8", newline="").read() == r.srt_text, \
+    "Save all as .srt didn't put the clip's .srt beside it"
 print("GUI smoke test OK")

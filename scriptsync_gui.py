@@ -686,6 +686,10 @@ class App(tk.Tk):
         self.btn_run.pack(side="left")
         self.btn_cancel = ttk.Button(rf, text="Stop", command=self.stop, state="disabled")
         self.btn_cancel.pack(side="left", padx=8)
+        self.btn_save_all = ttk.Button(rf, text="Save all as .srt", command=self.save_all, state="disabled")
+        self.btn_save_all.pack(side="left")
+        _Tooltip(self.btn_save_all, "Save every synced clip's .srt at once: beside each clip, "
+                                    "or in the Save .srt to folder if one is set")
         self.progress = ttk.Progressbar(rf, maximum=1000)
         self.progress.pack(side="left", fill="x", expand=True, padx=(12, 0))
 
@@ -1053,6 +1057,9 @@ class App(tk.Tk):
             "", False
 
     def _update_status(self):
+        if hasattr(self, "btn_save_all"):
+            ready = not self._busy() and any(e["result"] for e in self.entries.values())
+            self.btn_save_all.configure(state="normal" if ready else "disabled")
         key, state, detail, right, link = self._status()
         if key != self._dot_key:
             self._dot_key = key
@@ -1614,24 +1621,32 @@ class App(tk.Tk):
         if e and e["result"]:
             self.show_result(e)
 
+    def _keep_recut(self, e):
+        """An unsaved re-cut of the selected clip becomes its result (with its own review sheet).
+        -> the clip's result, or None if it couldn't be written."""
+        if not self._preview:
+            return e["result"]
+        try:
+            res = core.write_result(self._preview)
+        except core.SyncError as ex:
+            messagebox.showerror("Couldn't save", str(ex))
+            return None
+        log.info("re-cut kept: %s", os.path.basename(res.srt_path))
+        e["result"] = res
+        flagged = res.n_check + res.n_bad
+        self._refresh_row(e, status=f"Done - {flagged} to review" if flagged else "Done ✔")
+        self.show_result(e)
+        return res
+
     def save_srt(self, dest=None):
         """Save as .srt: the only time a subtitle file is written where the user keeps their project.
         Syncs (and re-cuts) only write to the app's own folder; see core.write_result."""
         e = self._selected()
         if not (e and e["result"]):
             return
-        res = e["result"]
-        if self._preview:                       # a re-cut: keep it as this clip's result (and its review sheet)
-            try:
-                res = core.write_result(self._preview)
-            except core.SyncError as ex:
-                messagebox.showerror("Couldn't save", str(ex))
-                return
-            log.info("re-cut kept: %s", os.path.basename(res.srt_path))
-            e["result"] = res
-            flagged = res.n_check + res.n_bad
-            self._refresh_row(e, status=f"Done - {flagged} to review" if flagged else "Done ✔")
-            self.show_result(e)
+        res = self._keep_recut(e)
+        if res is None:
+            return
         if dest is None:
             folder = self.var_out.get().strip() or os.path.dirname(os.path.abspath(e["job"].video))
             dest = filedialog.asksaveasfilename(
@@ -1647,6 +1662,44 @@ class App(tk.Tk):
         e["saved"] = written[0]
         self._show_panel()
         self.rc_info.configure(text=f"Saved {os.path.basename(written[0])}.")
+
+    def save_all(self):
+        """Save all as .srt: every synced clip's .srt at once (a batch would otherwise need one Save as .srt
+        dialog per clip). Each goes beside its clip, or into the "Save .srt to" folder when one is set,
+        under the sync's own name. An unsaved re-cut of the selected clip is kept first, as Save as .srt does."""
+        if self._busy():
+            return
+        sel = self._selected()
+        if sel and sel["result"] and self._keep_recut(sel) is None:
+            return
+        done = [e for e in self.entries.values() if e["result"]]
+        if not done:
+            return
+        folder = self.var_out.get().strip()
+        saved, errors = 0, []
+        for e in done:
+            res = e["result"]
+            d = folder or os.path.dirname(os.path.abspath(e["job"].video))
+            try:
+                written = core.save_srt_as(res, os.path.join(d, os.path.basename(res.srt_path)))
+            except core.SyncError as ex:
+                errors.append((e["job"].label(), str(ex)))
+                continue
+            e["saved"] = written[0]
+            saved += 1
+        log.info("save all: %d of %d .srt file(s) saved %s", saved, len(done),
+                 "to the Save .srt to folder" if folder else "beside their clips")
+        self._show_panel()
+        where = "in the Save .srt to folder" if folder else "beside each clip"
+        self._outcome_errors = errors
+        if errors:
+            self._outcome = ("dot_err", "Not all saved", f"{saved} of {len(done)} .srt file(s) saved {where}; "
+                             f"{errors[0][0]}: {errors[0][1]}", "Details…", True)
+            messagebox.showerror("Couldn't save every .srt",
+                                 "\n\n".join(f"{name}:\n{msg}" for name, msg in errors))
+        else:
+            self._outcome = ("dot_run", "Saved", f"{saved} .srt file(s) saved {where}.", "", False)
+        self._update_status()
 
     def _result_entry(self):
         e = self._selected() or next((x for x in self.entries.values() if x["result"]), None)

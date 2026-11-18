@@ -100,6 +100,16 @@ def log_dir() -> str:
     return os.path.join(app_data_dir(), "logs")
 
 
+def review_dir() -> str:
+    """Review sheets (<name>.review.txt): kept in the app's own folder, never beside the clip."""
+    return os.path.join(app_data_dir(), "reviews")
+
+
+def working_dir() -> str:
+    """The working .srt (and word timings) of each sync, until the user saves a copy where they want it."""
+    return os.path.join(app_data_dir(), "cache", "subtitles")
+
+
 def log_path() -> str:
     return os.path.join(log_dir(), LOG_NAME)
 
@@ -308,7 +318,7 @@ class Job:
     video: str
     script_path: Optional[str] = None
     script_text: Optional[str] = None
-    out_dir: Optional[str] = None
+    out_dir: Optional[str] = None       # where the .srt goes; None = the working folder (see working_dir())
     line_breaks: Optional[str] = None   # the same script re-cut by the user / an outside tool: one cue per line
     fps: Optional[float] = None         # this clip's frame rate: None = automatic, 0 = don't snap
 
@@ -1863,11 +1873,11 @@ def sync_words(lines: list, asr: list, duration: float, s: Settings, cuts: Optio
 
 def run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> SyncResult:
     """Sync one clip and write its files. Logs each step and how long it took."""
+    if job.out_dir:                                 # first, so "<clip folder>" wins when they're the same
+        register_private_path(job.out_dir, "<output folder>")
     register_private_path(os.path.dirname(os.path.abspath(job.video)), "<clip folder>")
     if job.script_path:
         register_private_path(os.path.dirname(os.path.abspath(job.script_path)), "<script folder>")
-    if job.out_dir:
-        register_private_path(job.out_dir, "<output folder>")
     t0 = time.monotonic()
     log.info("sync start: %s", job.label())
     try:
@@ -1964,7 +1974,7 @@ def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> S
     res.settings = s
     res.meta = {"video": job.video, "label": job.label(), "script_label": script_label, "n_lines": len(lines),
                 "n_words": sum(len(l.split()) for l in lines), "lang": lang or s.language,
-                "out_dir": job.out_dir or os.path.dirname(os.path.abspath(job.video)),
+                "out_dir": job.out_dir,
                 "own_line_breaks": s_cues is not s, "listen": dict(listen), "cuts_checked": bool(cut_box.get("cuts") is not None
                                                                           and probe_clip(job.video).get("width"))}
     progress(0.96, "Writing files")
@@ -1989,14 +1999,22 @@ def recut(res: SyncResult, max_chars: int, max_words: int) -> SyncResult:
 
 
 def write_result(res: SyncResult) -> SyncResult:
-    """Write the .srt and review sheet (and word timings if asked) under a new, unique name."""
+    """Write the .srt and review sheet (and word timings if asked) under a new, unique name.
+    Nothing goes beside the clip: the review sheet goes to review_dir(), the .srt (and word timings) to the
+    job's output folder, or to working_dir() when there is none (the app saves a copy with save_srt_as())."""
     s, m = res.settings, res.meta
     res.report_text = make_report(m["label"], m["script_label"], res, s, m["n_lines"], m["n_words"], m["lang"])
-    out_dir = m["out_dir"]
-    os.makedirs(out_dir, exist_ok=True)
-    stem = unique_stem(out_dir, output_stem(m["video"], s))
+    out_dir = m.get("out_dir") or working_dir()
+    rev_dir = review_dir()
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(rev_dir, exist_ok=True)
+    except OSError as e:
+        raise SyncError(f"Couldn't save to '{out_dir}': {e.strerror or e}", "SS-501")
+    prune_old_outputs()
+    stem = unique_stem([out_dir, rev_dir], output_stem(m["video"], s))
     res.srt_path = os.path.join(out_dir, stem + ".srt")
-    res.report_path = os.path.join(out_dir, stem + ".review.txt")
+    res.report_path = os.path.join(rev_dir, stem + ".review.txt")
     try:
         log.info("output: %s (+ review sheet%s)", os.path.basename(res.srt_path),
                  ", word timings" if s.export_words else "")
@@ -2014,6 +2032,49 @@ def write_result(res: SyncResult) -> SyncResult:
     except OSError as e:
         raise SyncError(f"Couldn't save to '{out_dir}': {e.strerror or e}", "SS-501")
     return res
+
+
+def save_srt_as(res: SyncResult, dest: str) -> list:
+    """Copy a sync's .srt to `dest` (the user's "Save as .srt"), with its word timings beside it if they were
+    made. Returns the paths written."""
+    stem = dest[:-4] if dest.lower().endswith(".srt") else dest
+    dest = stem + ".srt"
+    written = []
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        with open(dest, "w", encoding="utf-8", newline="") as f:
+            f.write(res.srt_text)
+        written.append(dest)
+        for src, ext in ((res.words_json_path, ".words.json"), (res.words_srt_path, ".words.srt")):
+            if src and os.path.exists(src):
+                shutil.copyfile(src, stem + ext)
+                written.append(stem + ext)
+    except OSError as e:
+        raise SyncError(f"Couldn't save to '{os.path.dirname(os.path.abspath(dest))}': {e.strerror or e}",
+                        "SS-501")
+    log.info("saved a copy: %s", os.path.basename(dest))
+    return written
+
+
+OUTPUT_KEEP_DAYS = 30
+
+
+def prune_old_outputs(days: float = OUTPUT_KEEP_DAYS):
+    """Working subtitles and review sheets are a cache: drop the ones older than `days` so the app's folder
+    doesn't grow forever. Files the user saved with "Save as .srt" live elsewhere and are never touched."""
+    limit = time.time() - days * 86400
+    for d in (working_dir(), review_dir()):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for f in names:
+            p = os.path.join(d, f)
+            try:
+                if OUTPUT_FILE.search(f) and os.path.isfile(p) and os.path.getmtime(p) < limit:
+                    os.remove(p)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------
@@ -2043,10 +2104,12 @@ def output_stem(video: str, s: Settings, when: Optional[float] = None) -> str:
     return f"{clip}_synced_{s.max_chars}ch_{max(s.max_words, 0)}w_{fps_label(s.fps)}_{stamp}"
 
 
-def unique_stem(out_dir: str, stem: str) -> str:
-    """Add _2, _3 ... if a sync with this exact name already exists (two syncs in the same second)."""
+def unique_stem(out_dir, stem: str) -> str:
+    """Add _2, _3 ... if a sync with this exact name already exists (two syncs in the same second).
+    `out_dir` is one folder or a list of them (the .srt's and the review sheet's)."""
+    dirs = [out_dir] if isinstance(out_dir, str) else list(out_dir)
     cand, n = stem, 2
-    while any(os.path.exists(os.path.join(out_dir, cand + ext))
+    while any(os.path.exists(os.path.join(d, cand + ext)) for d in dirs
               for ext in (".srt", ".review.txt", ".words.json", ".words.srt")):
         cand, n = f"{stem}_{n}", n + 1
     return cand
@@ -2080,10 +2143,11 @@ def find_script_for(video: str) -> Optional[str]:
 
 
 def previous_outputs(video: str, out_dir: Optional[str] = None) -> list:
-    """Subtitle files an earlier sync of this clip left behind (newest first), looking in out_dir
-    and next to the clip. Matches both "<clip>_synced_....srt" and the older "<clip>.synced.srt"."""
+    """Subtitle files an earlier sync of this clip left behind (newest first), looking in the working folder,
+    out_dir and next to the clip (where saved copies, and syncs before this layout, are).
+    Matches both "<clip>_synced_....srt" and the older "<clip>.synced.srt"."""
     stem = os.path.splitext(os.path.basename(video))[0].lower()
-    dirs = {os.path.dirname(os.path.abspath(video))}
+    dirs = {os.path.dirname(os.path.abspath(video)), os.path.abspath(working_dir())}
     if out_dir:
         dirs.add(os.path.abspath(out_dir))
     found = []
@@ -2119,7 +2183,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Sync a writer's script to a clip's audio -> SRT")
     ap.add_argument("video")
     ap.add_argument("script", help=".docx / .txt / .md / .srt")
-    ap.add_argument("-o", "--out", help="output folder (default: next to the clip)")
+    ap.add_argument("-o", "--out", help="folder for the .srt (default: next to the clip); the review sheet "
+                                        "always goes to the app's reviews folder")
     ap.add_argument("--model", default="small")
     ap.add_argument("--language", default="auto")
     ap.add_argument("--max-chars", type=int, default=40)
@@ -2166,7 +2231,8 @@ def main(argv=None):
 
     try:
         lb = read_script_file(a.line_breaks) if a.line_breaks else None
-        res = run_job(Job(a.video, a.script, None, a.out, line_breaks=lb, fps=clip_rate), s, prog)
+        out = a.out or os.path.dirname(os.path.abspath(a.video))   # the command line has no "Save as" step
+        res = run_job(Job(a.video, a.script, None, out, line_breaks=lb, fps=clip_rate), s, prog)
     except (SyncError, OSError) as e:
         print("Error:", e, file=sys.stderr)
         return 1

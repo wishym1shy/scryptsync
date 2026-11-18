@@ -622,7 +622,7 @@ class App(tk.Tk):
         ttk.Combobox(r, textvariable=self.var_model, values=list(MODELS), state="readonly", width=30).pack(
             side="left", padx=(8, 6))
         ttk.Combobox(r, textvariable=self.var_lang, values=list(LANGS), state="readonly", width=16).pack(side="left")
-        ttk.Label(r, text="Save to").pack(side="left", padx=(16, 0))
+        ttk.Label(r, text="Save .srt to").pack(side="left", padx=(16, 0))
         ttk.Entry(r, textvariable=self.var_out).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(r, text="Choose\u2026", command=self.choose_out).pack(side="left")
         ttk.Button(r, text="More options\u2026", command=self.open_more_options).pack(side="left", padx=(8, 0))
@@ -664,7 +664,7 @@ class App(tk.Tk):
         row(shp, 3, "Hold through pauses up to (s)", lambda f: ttk.Spinbox(
             f, from_=0, to=2, increment=0.1, textvariable=self.v_bridge, width=6))
         outg = group(2, "Output")
-        ttk.Label(outg, text="Save to  (blank = beside each clip)").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(outg, text="Save .srt to  (blank = beside each clip)").grid(row=0, column=0, columnspan=2, sticky="w")
         so = ttk.Frame(outg)
         so.grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 4))
         ttk.Entry(so, textvariable=self.var_out).pack(side="left", fill="x", expand=True)
@@ -726,7 +726,7 @@ class App(tk.Tk):
         self.rc_words_box.pack(side="left")
         self.rc_words_box.bind("<KeyRelease>", lambda e: self._recut_soon())
         # buttons first, so a long message can never push them out of the bar
-        self.btn_save_cut = ttk.Button(bar, text="Save as new .srt", command=self.save_recut, state="disabled")
+        self.btn_save_cut = ttk.Button(bar, text="Save as .srt", command=self.save_srt, state="disabled")
         self.btn_save_cut.pack(side="right")
         self.btn_undo_cut = ttk.Button(bar, text="Undo", command=self.undo_recut, state="disabled")
         self.btn_undo_cut.pack(side="right", padx=(0, 6))
@@ -845,7 +845,7 @@ class App(tk.Tk):
         self.p_script.configure(text=sc, style="PanelBold.TLabel" if (job.script_text or job.script_path)
                                 else "PanelBad.TLabel")
         self._sync_fps_box(e)
-        last = e["result"].srt_path if e["result"] else next(
+        last = e.get("saved") or (e["result"].srt_path if e["result"] else None) or next(
             iter(core.previous_outputs(job.video, self.var_out.get().strip() or None)), "")
         name = os.path.basename(last) if last else "Not synced yet"
         if len(name) > 46:                      # keep the date/time end visible
@@ -1128,7 +1128,7 @@ class App(tk.Tk):
         self._list_changed()
 
     def choose_out(self):
-        d = filedialog.askdirectory(title="Where should the .srt files go?")
+        d = filedialog.askdirectory(title="Where should Save as .srt put the files?")
         if d:
             self.var_out.set(d)
 
@@ -1367,9 +1367,9 @@ class App(tk.Tk):
         self._run(todo, self.current_settings())
 
     def _run(self, todo, s):
-        out = self.var_out.get().strip() or None
         for e in todo:
-            e["job"].out_dir = out
+            e["job"].out_dir = None              # the working folder: only Save as .srt writes to the project
+            e.pop("saved", None)
             e["result"] = None
             self._refresh_row(e, status="Waiting…", match="")
         self._save_settings()
@@ -1535,8 +1535,7 @@ class App(tk.Tk):
         self.extra.config(text="\n".join(bits))
         self.btn_more.config(state="normal")
         if r.words_json_path:
-            bits.append(f"Word timings saved: {os.path.basename(r.words_json_path)}, "
-                        f"{os.path.basename(r.words_srt_path)}")
+            bits.append("Word timings ready: Save as .srt also saves the .words.json and .words.srt beside it.")
             self.extra.config(text="\n".join(bits))
 
     # ------------------------------------------------------------ live re-cut (#13)
@@ -1596,17 +1595,18 @@ class App(tk.Tk):
             return
         if r.meta.get("own_line_breaks"):
             self._set_recut_enabled(False)
+            self.btn_save_cut.configure(state="normal", style="Accent.TButton")
             self.rc_info.configure(text="Using your own line breaks (More > Apply my own line breaks to change them).")
             return
         self._set_recut_enabled(True)
+        # the .srt only reaches the clip's folder (or wherever the user picks) through this button
+        self.btn_save_cut.configure(state="normal", style="Accent.TButton")
         if self._preview:
             n, was = len(self._preview.cues), len(r.cues)
             self.rc_info.configure(text=f"Re-cut: {n} subtitles (was {was}). Not saved yet.")
-            self.btn_save_cut.configure(state="normal", style="Accent.TButton")
             self.btn_undo_cut.configure(state="normal")
         else:
-            self.rc_info.configure(text="Drag to re-cut instantly. Matches the saved file.")
-            self.btn_save_cut.configure(state="disabled", style="TButton")
+            self.rc_info.configure(text="Drag to re-cut instantly, then Save as .srt.")
             self.btn_undo_cut.configure(state="disabled")
 
     def undo_recut(self):
@@ -1614,21 +1614,39 @@ class App(tk.Tk):
         if e and e["result"]:
             self.show_result(e)
 
-    def save_recut(self):
+    def save_srt(self, dest=None):
+        """Save as .srt: the only time a subtitle file is written where the user keeps their project.
+        Syncs (and re-cuts) only write to the app's own folder; see core.write_result."""
         e = self._selected()
-        if not (e and self._preview):
+        if not (e and e["result"]):
+            return
+        res = e["result"]
+        if self._preview:                       # a re-cut: keep it as this clip's result (and its review sheet)
+            try:
+                res = core.write_result(self._preview)
+            except core.SyncError as ex:
+                messagebox.showerror("Couldn't save", str(ex))
+                return
+            log.info("re-cut kept: %s", os.path.basename(res.srt_path))
+            e["result"] = res
+            flagged = res.n_check + res.n_bad
+            self._refresh_row(e, status=f"Done - {flagged} to review" if flagged else "Done ✔")
+            self.show_result(e)
+        if dest is None:
+            folder = self.var_out.get().strip() or os.path.dirname(os.path.abspath(e["job"].video))
+            dest = filedialog.asksaveasfilename(
+                title="Save as .srt", initialdir=folder, initialfile=os.path.basename(res.srt_path),
+                defaultextension=".srt", filetypes=[("Subtitles", "*.srt"), ("All files", "*.*")])
+        if not dest:
             return
         try:
-            res = core.write_result(self._preview)
+            written = core.save_srt_as(res, dest)
         except core.SyncError as ex:
             messagebox.showerror("Couldn't save", str(ex))
             return
-        log.info("re-cut saved: %s", os.path.basename(res.srt_path))
-        e["result"] = res
-        flagged = res.n_check + res.n_bad
-        self._refresh_row(e, status=f"Done - {flagged} to review" if flagged else "Done ✔")
-        self.show_result(e)
-        self.rc_info.configure(text="Saved as a new .srt (the earlier one is kept).")
+        e["saved"] = written[0]
+        self._show_panel()
+        self.rc_info.configure(text=f"Saved {os.path.basename(written[0])}.")
 
     def _result_entry(self):
         e = self._selected() or next((x for x in self.entries.values() if x["result"]), None)
@@ -1690,8 +1708,8 @@ class App(tk.Tk):
 
     def open_srt(self):
         e = self._result_entry()
-        if e:
-            reveal(e["result"].srt_path)
+        if e:                                   # the copy the user saved, else the working copy in the app's folder
+            reveal(e.get("saved") or e["result"].srt_path)
 
     def _on_close(self):
         self._save_settings()

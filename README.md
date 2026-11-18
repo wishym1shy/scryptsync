@@ -248,6 +248,50 @@ clipboard for a bug report. Folder paths are replaced by placeholders such as `<
 log never contains your script or subtitle text; clip file names are included, so read it before posting it publicly.
 On the command line, add `-v` to also print the log to the terminal.
 
+### Error codes
+
+Every error and warning ends with a code like **[SS-401]**. If you report a problem, include the code and
+**More options > Troubleshooting > Copy diagnostic info** (it says which graphics card and device were used and
+how fast listening was).
+
+| Code | What happened | What to do |
+|---|---|---|
+| SS-101 | The Word file couldn't be opened | Save it again as `.docx` (not `.doc`), or paste the script instead. |
+| SS-102 | Your own line breaks are empty | Paste the re-cut script, or leave the box empty to go back to automatic cuts. |
+| SS-103 | Your own line breaks don't match the script's words | The message lists each changed word; put them back exactly as the script has them. |
+| SS-104 | The script file can't be found | It was moved or renamed: pick it again. |
+| SS-105 | No script was given for the clip | Double-click the clip and paste or import its script. |
+| SS-106 | The script is empty after cleaning | Everything is in `[brackets]` or is a `Name:` label: check those options in More options. |
+| SS-201 | The clip can't be found | It was moved or renamed: add it again. |
+| SS-202 | The clip's audio couldn't be read | The file is damaged, still copying or exporting, or has no audio track. |
+| SS-203 | No speech was detected | Wrong clip, music only, or the voice is very quiet. |
+| SS-301 | The speech engine isn't installed | Double-click the launcher again; it repairs the setup. |
+| SS-302 | Windows blocked the speech engine | See *Windows 11: Smart App Control* below. |
+| SS-303 | numpy isn't installed | Double-click the launcher again. |
+| SS-304 | ffmpeg wasn't found | Double-click the launcher again. |
+| SS-305 | The speech model folder can't be used | Choose another folder in More options, or clear it to use the default. |
+| SS-306 | The speech model couldn't be downloaded | The first sync with each model downloads it once: check the internet connection; a work network or firewall may block it. |
+| SS-401 | Your NVIDIA graphics card couldn't be used, so listening ran on the CPU (slower) | See *Slow syncing / graphics card not used* below. |
+| SS-402 | Listening took longer than the clip itself | Choose a faster model (More options > Listening), and see *Slow syncing* below. |
+| SS-403 | Couldn't look for cuts in the video | The video may be damaged; subtitles are still made, just not snapped to cuts. |
+| SS-404 | Less than 40% of the script was found in the audio | Check it's the right script and language, and that music isn't drowning out the voice. |
+| SS-501 | The subtitle files couldn't be saved | The folder is read-only or full: choose another output folder. |
+| SS-900 | Unexpected error (a bug) | Please report it with the diagnostic info. |
+
+### Slow syncing / graphics card not used
+
+ScryptSync uses an NVIDIA graphics card automatically when it can, and the CPU otherwise. The CPU works but can be
+many times slower. If an NVIDIA card is found but can't be used, ScryptSync says why (**SS-401**) and uses the
+CPU for the rest of that session instead of trying the card again for every clip. Common reasons:
+
+- **NVIDIA's CUDA libraries are missing** (for example `cublas64_12.dll` or cuDNN). The speech engine needs
+  NVIDIA's cuBLAS for CUDA 12 and cuDNN 9, which the graphics driver alone doesn't include.
+- **A very new card** (for example the RTX 50 series) may not be supported by the speech engine yet.
+- **Out of memory** with the bigger models: choose a smaller model.
+
+The review sheet says where listening ran and how fast (`Listened: on the CPU, 120 s of audio in 95 s`). Slower
+than the clip itself shows **SS-402**.
+
 ### Windows 11: "Smart App Control" blocks the speech engine
 
 On a new (or freshly reset) Windows 11 PC, **Smart App Control** is often turned on. It blocks part of the

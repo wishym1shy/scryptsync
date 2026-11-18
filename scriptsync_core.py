@@ -183,7 +183,29 @@ def system_info() -> dict:
         "numpy": _pkg_version("numpy"),
         "ffmpeg": ("system" if ff and ff == shutil.which("ffmpeg") else "bundled (imageio-ffmpeg)") if ff
         else "NOT FOUND",
+        "gpu": _gpu_name(),
+        "gpu this session": f"NOT USABLE: {_gpu_problem}" if _gpu_problem else "no problem so far",
     }
+
+
+_gpu_name_cache: list = []
+
+
+def _gpu_name() -> str:
+    """The NVIDIA card and driver, from nvidia-smi (installed with the driver). Cached; a few ms."""
+    if not _gpu_name_cache:
+        name = "none found (no nvidia-smi)"
+        exe = shutil.which("nvidia-smi")
+        if exe:
+            kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+            try:
+                p = subprocess.run([exe, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"],
+                                   capture_output=True, text=True, timeout=3, **kw)
+                name = p.stdout.strip().replace("\n", "; ") or f"nvidia-smi failed: {p.stderr.strip()[:100]}"
+            except (OSError, subprocess.SubprocessError) as e:
+                name = f"nvidia-smi failed: {e}"
+        _gpu_name_cache.append(name)
+    return _gpu_name_cache[0]
 
 
 def log_tail(lines: int = 80) -> str:
@@ -327,7 +349,41 @@ class Cancelled(Exception):
 
 
 class SyncError(Exception):
-    """A problem the user can fix (message is shown as-is)."""
+    """A problem the user can fix. Shown as-is, followed by its code (see ERROR_CODES and the README's
+    Troubleshooting), so a user's report says exactly what happened."""
+
+    def __init__(self, message: str, code: str = "SS-900"):
+        super().__init__(message)
+        self.code = code
+
+    def __str__(self):
+        return f"{self.args[0]} [{self.code}]"
+
+
+# Every code a user can see, for the README's troubleshooting table and bug reports.
+ERROR_CODES = {
+    "SS-101": "The Word file couldn't be opened",
+    "SS-102": "Your own line breaks are empty",
+    "SS-103": "Your own line breaks don't match the script's words",
+    "SS-104": "The script file can't be found",
+    "SS-105": "No script was given for the clip",
+    "SS-106": "The script is empty after cleaning",
+    "SS-201": "The clip can't be found",
+    "SS-202": "The clip's audio couldn't be read",
+    "SS-203": "No speech was detected in the clip",
+    "SS-301": "The speech engine isn't installed",
+    "SS-302": "Windows blocked the speech engine (Smart App Control)",
+    "SS-303": "numpy isn't installed",
+    "SS-304": "ffmpeg wasn't found",
+    "SS-305": "The speech model folder can't be used",
+    "SS-306": "The speech model couldn't be downloaded",
+    "SS-401": "Warning: the NVIDIA graphics card couldn't be used, so listening ran on the CPU (slower)",
+    "SS-402": "Warning: listening took longer than the clip itself",
+    "SS-403": "Warning: couldn't look for cuts in the video",
+    "SS-404": "Warning: less than 40% of the script was found in the audio",
+    "SS-501": "The subtitle files couldn't be saved",
+    "SS-900": "Unexpected error (a bug): please report it with the diagnostic info",
+}
 
 
 # --------------------------------------------------------------------------
@@ -352,7 +408,7 @@ def _read_docx(path: str) -> str:
         with zipfile.ZipFile(path) as z:
             xml = z.read("word/document.xml")
     except (KeyError, zipfile.BadZipFile) as e:
-        raise SyncError(f"Couldn't open the Word file '{os.path.basename(path)}' ({e}).")
+        raise SyncError(f"Couldn't open the Word file '{os.path.basename(path)}' ({e}).", "SS-101")
     root = ET.fromstring(xml)
     lines = []
     for p in root.iter(_W + "p"):
@@ -1134,13 +1190,13 @@ def check_line_breaks(raw_script: str, line_breaks: str, s: Settings) -> list:
     s1 = replace(s, keep_script_lines=True)
     new_lines = parse_script(line_breaks, s1)
     if not new_lines:
-        raise SyncError("Your line breaks are empty.")
+        raise SyncError("Your line breaks are empty.", "SS-102")
     diffs = compare_words(parse_script(raw_script, s1), new_lines)
     if diffs:
         more = f"\n... and {len(diffs) - 8} more" if len(diffs) > 8 else ""
         raise SyncError("Your line breaks don't match the script's words, so they weren't used "
                         "(the subtitles must stay the writer's text exactly):\n- "
-                        + "\n- ".join(diffs[:8]) + more)
+                        + "\n- ".join(diffs[:8]) + more, "SS-103")
     return new_lines
 
 
@@ -1155,6 +1211,13 @@ def make_report(job_label: str, script_label: str, res: SyncResult, s: Settings,
     if res.fps_source:
         L.append(f"Frames:  {fps_name(res.fps)}  ({res.fps_source})")
     L.append(f"Heard:   {res.match_pct:.0f}% of the script's words were found in the audio")
+    li = res.meta.get("listen") or {}
+    if li.get("cached"):
+        L.append("Listened: saved transcript reused (no listening needed)")
+    elif li.get("listen_seconds") and li.get("audio_seconds"):
+        L.append(f"Listened: on the {'graphics card (GPU)' if li.get('device') == 'cuda' else 'CPU'}, "
+                 f"{li['audio_seconds']:.0f} s of audio in {li['listen_seconds']:.0f} s "
+                 f"({li['audio_seconds'] / max(li['listen_seconds'], 1e-6):.1f}x real time)")
     L.append(f"Cues:    {len(res.cues)} total  =  {res.n_ok} OK, {res.n_check} CHECK, {res.n_bad} BAD")
     if res.cut_stats:
         near = res.cut_stats.get("near", [])
@@ -1266,7 +1329,7 @@ def check_model_dir(path: str) -> str:
         os.remove(probe)
     except OSError as e:
         raise SyncError(f"Can't use '{path}' for the speech models: {e.strerror or e}. "
-                        "Choose another folder in More options, or clear it to use the default.")
+                        "Choose another folder in More options, or clear it to use the default.", "SS-305")
     return path
 
 
@@ -1294,6 +1357,39 @@ def _forget_setup():
         pass
 
 
+def _is_download_error(e: BaseException) -> bool:
+    """The speech model couldn't be fetched from the internet (no connection, blocked, server error)."""
+    mod = type(e).__module__ or ""
+    return (mod.startswith(("huggingface_hub", "requests", "httpx", "urllib3"))
+            or isinstance(e, (ConnectionError, TimeoutError))
+            or "LocalEntryNotFound" in type(e).__name__)
+
+
+def _gpu_reason(e: BaseException) -> str:
+    """Why the NVIDIA GPU couldn't be used, in words a user can act on."""
+    text = f"{type(e).__name__}: {e}"
+    low = text.lower()
+    if "cublas" in low:
+        m = re.search(r"cublas\w*\.dll|libcublas[\w.]*", low)
+        return f"NVIDIA's CUDA library {m.group(0) if m else 'cuBLAS'} is missing"
+    if "cudnn" in low:
+        return "NVIDIA's cuDNN library is missing or doesn't match"
+    if "no kernel image" in low or "not compatible" in low or "unsupported gpu" in low or "sm_" in low:
+        return "this graphics card is newer than the speech engine supports"
+    if "out of memory" in low:
+        return "the graphics card ran out of memory (try a smaller model)"
+    if "driver" in low:
+        return "the NVIDIA driver is too old or not working (update it)"
+    return text[:200]
+
+
+# After the GPU failed once, use the CPU for the rest of the session instead of failing again for every
+# clip (each try loads the model onto the GPU first, which is slow). Reset by restarting the app.
+_gpu_problem: Optional[str] = None
+GPU_WARNING = ("Your NVIDIA graphics card couldn't be used ({}), so listening ran on the CPU, which can be "
+               "many times slower. See Troubleshooting in the README.")
+
+
 def _load_whisper(model: str, device: str, progress, model_dir: str = ""):
     key = (model, device, model_dir)
     if key in _model_cache:
@@ -1304,10 +1400,10 @@ def _load_whisper(model: str, device: str, progress, model_dir: str = ""):
         if "DLL load failed" in str(e):
             # Installed, but Windows refused to load it (usually Smart App Control: ctranslate2.dll is
             # not digitally signed). Reinstalling can't fix that, so keep the setup as it is.
-            raise SyncError(WINDOWS_BLOCKED + f"\n\nDetails: {e}") from e
+            raise SyncError(WINDOWS_BLOCKED + f"\n\nDetails: {e}", "SS-302") from e
         _forget_setup()
         raise SyncError("The speech engine (faster-whisper) isn't installed. "
-                        "Run the launcher again or: pip install faster-whisper")
+                        "Run the launcher again or: pip install faster-whisper", "SS-301")
     where = model_dir or default_model_dir()
     progress(0.02, f"Loading speech model '{model}' from {where} "
                    "(first time downloads it - this can take a few minutes)")
@@ -1315,7 +1411,15 @@ def _load_whisper(model: str, device: str, progress, model_dir: str = ""):
     t0 = time.monotonic()
     log.info("model: loading '%s' on %s (%s), %s folder", model, device, ctype,
              "custom" if model_dir else "default")
-    m = WhisperModel(model, device=device, compute_type=ctype, download_root=model_dir or None)
+    try:
+        m = WhisperModel(model, device=device, compute_type=ctype, download_root=model_dir or None)
+    except Exception as e:
+        if _is_download_error(e):
+            log.warning("model: download failed", exc_info=True)
+            raise SyncError(f"Couldn't download the speech model '{model}'. The first sync with each model "
+                            "downloads it once, so it needs an internet connection; a firewall or a work network "
+                            f"can also block it. Details: {type(e).__name__}: {e}", "SS-306") from e
+        raise
     log.info("model: ready in %.1f s", time.monotonic() - t0)
     _model_cache[key] = m
     return m
@@ -1332,12 +1436,12 @@ def decode_audio(path: str):
     ff = find_ffmpeg()
     if not ff:
         raise SyncError("ffmpeg wasn't found. Re-run the launcher so it can install it "
-                        "(pip install imageio-ffmpeg), or install ffmpeg yourself.")
+                        "(pip install imageio-ffmpeg), or install ffmpeg yourself.", "SS-304")
     try:
         import numpy as np
     except ImportError:
         _forget_setup()
-        raise SyncError("numpy isn't installed. Re-run the launcher to finish setup.")
+        raise SyncError("numpy isn't installed. Re-run the launcher to finish setup.", "SS-303")
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}   # no console flash on Windows
     # aresample first_pts=0: if the audio track starts after the clip does (common in camera, phone and screen
     # recordings), pad the start with silence, so sample 0 is the clip's time 0 like the video's frames.
@@ -1346,7 +1450,7 @@ def decode_audio(path: str):
                         "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, **kw)
     if p.returncode != 0 or not p.stdout:
         why = (p.stderr.decode("utf-8", "replace").strip().splitlines() or ["no audio stream?"])[-1]
-        raise SyncError(f"Couldn't read the audio from '{os.path.basename(path)}': {why}")
+        raise SyncError(f"Couldn't read the audio from '{os.path.basename(path)}': {why}", "SS-202")
     return np.frombuffer(p.stdout, dtype=np.float32)
 
 
@@ -1557,7 +1661,9 @@ def _auto_device() -> str:
         return "cpu"
 
 
-def _whisper_transcribe(path, s: Settings, hint: str, progress, cancel):
+def _whisper_transcribe(path, s: Settings, hint: str, progress, cancel, info: Optional[dict] = None):
+    global _gpu_problem
+    info = info if info is not None else {}
     progress(0.01, "Reading the audio")
     audio = decode_audio(path)
 
@@ -1583,19 +1689,36 @@ def _whisper_transcribe(path, s: Settings, hint: str, progress, cancel):
         return words, dur, info.language
 
     dev = s.device if s.device != "auto" else _auto_device()
-    log.info("device: %s (%s)", dev, "chosen automatically" if s.device == "auto" else "set by the user")
+    if dev == "cuda" and s.device == "auto" and _gpu_problem:
+        dev = "cpu"                         # it failed earlier in this session: don't pay for it again
+        info["gpu_problem"] = _gpu_problem
+        log.info("device: cpu (the GPU failed earlier in this session: %s)", _gpu_problem)
+    else:
+        log.info("device: %s (%s)", dev, "chosen automatically" if s.device == "auto" else "set by the user")
+    t0 = time.monotonic()
     try:
-        return run(dev)
+        out = run(dev)
     except (Cancelled, SyncError):
         raise
     except Exception as e:
         if dev == "cpu":
             raise
-        # GPU libraries missing/unusable -> retry on CPU
-        log.warning("device: GPU not usable, falling back to CPU", exc_info=True)
+        # GPU libraries missing/unusable -> retry on CPU, and remember it for the rest of the session
+        _gpu_problem = _gpu_reason(e)
+        info["gpu_problem"] = _gpu_problem
+        log.warning("device: GPU not usable (%s), using the CPU for the rest of this session", _gpu_problem,
+                    exc_info=True)
         _model_cache.pop((s.model, dev, model_dir), None)
-        progress(0.05, f"GPU not usable ({type(e).__name__}); using CPU")
-        return run("cpu")
+        progress(0.05, "Graphics card not usable; using the CPU (slower)")
+        dev = "cpu"
+        t0 = time.monotonic()
+        out = run("cpu")
+    took = time.monotonic() - t0
+    info.update(device=dev, listen_seconds=took, audio_seconds=out[1])
+    if out[1]:
+        log.info("listening: %.0f s of audio in %.0f s on %s (%.1fx real time)", out[1], took, dev,
+                 out[1] / max(took, 1e-6))
+    return out
 
 
 def _load_plugin():
@@ -1612,8 +1735,10 @@ _TRANSCRIPT_VERSION = 2   # bump when decoding/timing changes, so saved transcri
                           # (2: audio that starts late is no longer shifted to time 0)
 
 
-def transcribe(path: str, s: Settings, lines: list, progress, cancel):
-    """-> (list[AsrWord], duration, language). Uses the cache when allowed."""
+def transcribe(path: str, s: Settings, lines: list, progress, cancel, info: Optional[dict] = None):
+    """-> (list[AsrWord], duration, language). Uses the cache when allowed. ``info`` gets how it went:
+    device, listen_seconds, audio_seconds, gpu_problem, cached."""
+    info = info if info is not None else {}
     hint = vocab_hint(lines) if s.prime_vocab else ""
     plugin = _load_plugin()
     st = os.stat(path)
@@ -1625,6 +1750,7 @@ def transcribe(path: str, s: Settings, lines: list, progress, cancel):
         try:
             d = json.load(open(cpath, encoding="utf-8"))
             progress(0.85, "Using the saved transcript for this clip")
+            info["cached"] = True
             log.info("transcript: saved copy reused (%d words, %.1f s)", len(d["words"]), d["duration"])
             return [AsrWord(**w) for w in d["words"]], d["duration"], d.get("language", "")
         except Exception:
@@ -1634,7 +1760,7 @@ def transcribe(path: str, s: Settings, lines: list, progress, cancel):
         words, dur, lang = plugin.transcribe(path, s.language, hint, progress, cancel)
         words = [w if isinstance(w, AsrWord) else AsrWord(*w) for w in words]
     else:
-        words, dur, lang = _whisper_transcribe(path, s, hint, progress, cancel)
+        words, dur, lang = _whisper_transcribe(path, s, hint, progress, cancel, info)
     log.info("transcript: %d words, %.1f s of audio, language %s", len(words), dur or 0, lang or "?")
     try:
         json.dump({"words": [w.__dict__ for w in words], "duration": dur, "language": lang},
@@ -1650,7 +1776,7 @@ def transcribe(path: str, s: Settings, lines: list, progress, cancel):
 def sync_words(lines: list, asr: list, duration: float, s: Settings, cuts: Optional[list] = None) -> SyncResult:
     """Pure alignment + cue building (no audio, no files)."""
     if not asr:
-        raise SyncError("No speech was detected in this clip.")
+        raise SyncError("No speech was detected in this clip.", "SS-203")
     words, off = align_script(lines, asr, duration)
     if not duration:
         duration = max(w.end for w in asr)
@@ -1661,7 +1787,7 @@ def sync_words(lines: list, asr: list, duration: float, s: Settings, cuts: Optio
     warnings = []
     if heard < 0.4:
         warnings.append("Less than 40% of the script was found in the audio. Is this the right "
-                        "script for this clip, is the language set correctly, or is there loud music?")
+                        "script for this clip, is the language set correctly, or is there loud music? [SS-404]")
     res = SyncResult(
         cues=cues, skipped=skipped, off_script=off, warnings=warnings, match_pct=pct,
         n_ok=sum(c.level == "ok" for c in cues), n_check=sum(c.level == "check" for c in cues),
@@ -1700,7 +1826,7 @@ def run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> Sy
 def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> SyncResult:
     progress = progress or (lambda f, m: None)
     if not os.path.exists(job.video):
-        raise SyncError(f"Can't find the clip: {job.video}")
+        raise SyncError(f"Can't find the clip: {job.video}", "SS-201")
     fps, fps_source = clip_fps(job, s)
     s = replace(s, fps=fps)
     script_kind = ("pasted text" if job.script_text and job.script_text.strip() else
@@ -1711,13 +1837,13 @@ def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> S
         raw, script_label = job.script_text, "(pasted text)"
     elif job.script_path:
         if not os.path.exists(job.script_path):
-            raise SyncError(f"Can't find the script: {job.script_path}")
+            raise SyncError(f"Can't find the script: {job.script_path}", "SS-104")
         raw, script_label = read_script_file(job.script_path), os.path.basename(job.script_path)
     else:
-        raise SyncError("No script was given for this clip.")
+        raise SyncError("No script was given for this clip.", "SS-105")
     lines = parse_script(raw, s)
     if not lines:
-        raise SyncError("The script is empty after cleaning (is everything in [brackets]?).")
+        raise SyncError("The script is empty after cleaning (is everything in [brackets]?).", "SS-106")
     hint_lines = lines              # the speech model's hint (and so its saved transcript) stays the same
     s_cues = s
     if job.line_breaks and job.line_breaks.strip():
@@ -1739,7 +1865,8 @@ def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> S
         cut_thread = threading.Thread(target=find, name="find-cuts", daemon=True)
         cut_thread.start()
     t = time.monotonic()
-    asr, dur, lang = transcribe(job.video, s, hint_lines, progress, cancel)
+    listen: dict = {}
+    asr, dur, lang = transcribe(job.video, s, hint_lines, progress, cancel, listen)
     log.info("step: listening took %.1f s", time.monotonic() - t)
     if cancel and cancel.is_set():
         raise Cancelled()
@@ -1754,7 +1881,15 @@ def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> S
     t = time.monotonic()
     res = sync_words(lines, asr, dur, s_cues, cut_box.get("cuts"))
     if "error" in cut_box:
-        res.warnings.append("Couldn't look for cuts in the video, so subtitle changes weren't moved onto them.")
+        res.warnings.append("Couldn't look for cuts in the video, so subtitle changes weren't moved onto them. "
+                            "[SS-403]")
+    if listen.get("gpu_problem"):
+        res.warnings.append(GPU_WARNING.format(listen["gpu_problem"]) + " [SS-401]")
+    took, audio = listen.get("listen_seconds", 0), listen.get("audio_seconds", 0)
+    if audio and took > max(audio * 1.5, 60):
+        res.warnings.append(f"Listening took {took / 60:.1f} min for {audio / 60:.1f} min of audio on the "
+                            f"{'graphics card' if listen.get('device') == 'cuda' else 'CPU'}. A faster model "
+                            "(More options > Listening) helps; see Troubleshooting in the README. [SS-402]")
     log.info("step: matching %d script lines took %.2f s", len(lines), time.monotonic() - t)
     if s_cues is not s:
         long_lines = sum(1 for ln in lines if len(ln) > s.max_chars)
@@ -1766,7 +1901,7 @@ def _run_job(job: Job, s: Settings, progress: Callable = None, cancel=None) -> S
     res.meta = {"video": job.video, "label": job.label(), "script_label": script_label, "n_lines": len(lines),
                 "n_words": sum(len(l.split()) for l in lines), "lang": lang or s.language,
                 "out_dir": job.out_dir or os.path.dirname(os.path.abspath(job.video)),
-                "own_line_breaks": s_cues is not s, "cuts_checked": bool(cut_box.get("cuts") is not None
+                "own_line_breaks": s_cues is not s, "listen": dict(listen), "cuts_checked": bool(cut_box.get("cuts") is not None
                                                                           and probe_clip(job.video).get("width"))}
     progress(0.96, "Writing files")
     write_result(res)
@@ -1813,7 +1948,7 @@ def write_result(res: SyncResult) -> SyncResult:
             with open(res.words_srt_path, "w", encoding="utf-8", newline="") as f:
                 f.write(make_words_srt(res.words, s))
     except OSError as e:
-        raise SyncError(f"Couldn't save to '{out_dir}': {e.strerror or e}")
+        raise SyncError(f"Couldn't save to '{out_dir}': {e.strerror or e}", "SS-501")
     return res
 
 

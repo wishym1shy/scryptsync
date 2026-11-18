@@ -1029,6 +1029,13 @@ def _finalize_times(cues: list, s: Settings, duration: float, cuts: Optional[lis
         c.speech_start, c.speech_end = c.start, c.end
     for c in cues:
         c.start = _snap(max(0.0, c.start - s.lead_in), s.fps)
+    # Two subtitles can't change on the same frame: the first would get no time on screen at all (the speech
+    # model sometimes gives a word no length, at the same moment as the next word). Start the next one a frame
+    # later, so every subtitle shows for at least one frame.
+    step = frame or 0.05
+    for i in range(1, n):
+        if cues[i].start < cues[i - 1].start + step - 1e-9:
+            cues[i].start = _snap(cues[i - 1].start + step, s.fps)
     for i, c in enumerate(cues):
         nxt = cues[i + 1].start if i + 1 < n else None
         if nxt is not None and nxt - c.end <= s.bridge_gap:

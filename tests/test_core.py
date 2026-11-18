@@ -76,6 +76,24 @@ def test_stretched_word_does_not_crush_unheard_lines():
     late = _untangle_stretched([AsrWord("hi", 0.5, 0.7), AsrWord("there", 3.0, 7.0), AsrWord("folks", 7.0, 7.4)])
     assert late[1].end == 7.0 and late[1].start > 6.0, late[1]
 
+def test_no_subtitle_gets_zero_time_on_screen():
+    # The speech model gave a one-word subtitle's word no length, at the same moment as the next subtitle's
+    # first word. Both subtitles then started on the same frame and the first one ended where it began
+    # (0 s on screen), which an editor may drop or refuse.
+    script = "Tell me\nwhich\none you would pick today"
+    a, _, _ = speak(["tell me"], t=1.0)
+    t = a[-1].end + 0.03
+    a += [AsrWord("which", t, t), AsrWord("one", t, t + 0.2)]          # "which" has no length
+    b, _, end = speak(["you would pick today"], t=t + 0.23)
+    for fps in (30.0, 30000 / 1001, 0.0):
+        s = Settings(max_chars=40, fps=fps, snap_to_cuts=False)
+        res = sync_words(parse_script(script, s), a + b, end, s)
+        frame = 1 / fps if fps else 0.05
+        for q in res.cues:
+            assert q.end - q.start >= frame - 1e-6, (fps, q)               # on screen for a frame or more
+        for p, q in zip(res.cues, res.cues[1:]):
+            assert p.end <= q.start + 1e-9, (fps, p, q)                     # and still no overlap
+
 def test_srt_format():
     c = [Cue(1, 0.067, 1.5, "Hi", 1, "ok", [], 0), Cue(2, 3661.0012, 3662.25, "There", 1, "ok", [], 1)]
     t = make_srt(c)

@@ -1425,6 +1425,14 @@ def _load_whisper(model: str, device: str, progress, model_dir: str = ""):
     return m
 
 
+# Before the speech model listens, quiet stretches are raised towards the level of the rest (ffmpeg's dynamic
+# audio normaliser: 150 ms frames, smoothed over 15 of them, up to 30x). A quiet voice next to a loud one, such as
+# a phone call in a clip, was otherwise not heard at all: 6% of a caller's words at -24 dB, 81% with this. It only
+# changes loudness, never timing, and made no difference on normal clips (with or without room noise).
+# Only the speech model hears this; nothing is written.
+ASR_LEVELER = "dynaudnorm=f=150:g=15:p=0.9:m=30"
+
+
 def decode_audio(path: str):
     """Clip -> mono 16 kHz float32 numpy array, using ffmpeg.
 
@@ -1446,8 +1454,8 @@ def decode_audio(path: str):
     # aresample first_pts=0: if the audio track starts after the clip does (common in camera, phone and screen
     # recordings), pad the start with silence, so sample 0 is the clip's time 0 like the video's frames.
     # Without it every subtitle came in early by that offset.
-    p = subprocess.run([ff, "-v", "error", "-nostdin", "-i", path, "-vn", "-af", "aresample=async=1:first_pts=0",
-                        "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, **kw)
+    p = subprocess.run([ff, "-v", "error", "-nostdin", "-i", path, "-vn", "-af", "aresample=async=1:first_pts=0,"
+                        + ASR_LEVELER, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, **kw)
     if p.returncode != 0 or not p.stdout:
         why = (p.stderr.decode("utf-8", "replace").strip().splitlines() or ["no audio stream?"])[-1]
         raise SyncError(f"Couldn't read the audio from '{os.path.basename(path)}': {why}", "SS-202")
@@ -1731,8 +1739,8 @@ def _load_plugin():
     return mod
 
 
-_TRANSCRIPT_VERSION = 2   # bump when decoding/timing changes, so saved transcripts made before are not reused
-                          # (2: audio that starts late is no longer shifted to time 0)
+_TRANSCRIPT_VERSION = 3   # bump when decoding/timing changes, so saved transcripts made before are not reused
+                          # (2: audio that starts late is no longer shifted to time 0; 3: quiet voices raised)
 
 
 def transcribe(path: str, s: Settings, lines: list, progress, cancel, info: Optional[dict] = None):

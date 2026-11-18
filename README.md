@@ -125,15 +125,20 @@ python -m venv .venv
    **Import .txt / .srt instead…** in that window to pick a file.
 2. Press **Sync** (all clips) or **Sync this clip** in the panel. The panel shows the selected clip's script,
    frame rate, its last subtitle file and the result.
-3. Next to each clip (or in the folder you pick) you get a subtitle file and its review sheet, named after the
-   clip and the settings used, plus the date and time of the sync:
-   - `clipname_synced_40ch_0w_30fps_2026-11-06_14-32-05.srt`
-   - `clipname_synced_40ch_0w_30fps_2026-11-06_14-32-05.review.txt`
+3. A sync writes **nothing into your project folder**. Its subtitle file and review sheet are kept in
+   ScryptSync's own folder, named after the clip and the settings used, plus the date and time of the sync:
+   - `clipname_synced_40ch_0w_30fps_2026-11-06_14-32-05.srt` in `ScryptSync\cache\subtitles` (the working copy)
+   - `clipname_synced_40ch_0w_30fps_2026-11-06_14-32-05.review.txt` in `ScryptSync\reviews`
 
-   `40ch` = max characters per subtitle, `0w` = max words (0 = no limit), `30fps` = the frame rate the times
-   were snapped to (`nosnap` = off). Every sync makes new files, so earlier versions are never overwritten:
-   sync again with different settings and compare.
+   (`%LOCALAPPDATA%\ScryptSync` on Windows, `~/.cache/ScryptSync` on macOS / Linux.) `40ch` = max characters
+   per subtitle, `0w` = max words (0 = no limit), `30fps` = the frame rate the times were snapped to
+   (`nosnap` = off). Every sync makes new files, so earlier versions are never overwritten. Working copies and
+   review sheets older than 30 days are cleared out automatically. **More > Open review sheet** opens the
+   review sheet.
 4. The Review panel colours each subtitle: green OK, amber CHECK, red BAD, with a note on what to look at.
+5. When the subtitles look right, press **Save as .srt** (above the subtitle list) and pick where to put the
+   file. It starts in the **Save .srt to** folder, or beside the clip if that's blank. This is the only time a
+   `.srt` lands in your project.
 
 The **status bar** at the bottom always says what the app is doing: Standing by (yellow), Clips loaded / Ready
 (orange), Running with a timer, then Finished in m:ss (green), or Stopped / Error (red; click **Details…** for what
@@ -182,8 +187,9 @@ Styling (font, size, position, colours) is done in your editor; the SRT carries 
 ### Re-cut after syncing
 
 Above the subtitle list, drag **Max characters** (or change **Max words**): the subtitles re-cut instantly from the
-word timings found during the sync, with no listening again. Changed subtitles are marked ✎. **Save as new .srt**
-writes it next to the earlier version (the name says the new limits); **Undo** goes back to the saved cut.
+word timings found during the sync, with no listening again. Changed subtitles are marked ✎. **Save as .srt**
+keeps the new cut (with a fresh review sheet whose name says the new limits) and saves it where you pick;
+**Undo** goes back to the last cut.
 
 ### Subtitle changes on video cuts
 
@@ -214,7 +220,7 @@ the script and refuses the line breaks otherwise, listing each word that was cha
 
 ### Word timings for other tools
 
-Tick **More options > Also save every word's timing** to also get:
+Tick **More options > Also save every word's timing** and **Save as .srt** also saves, beside the `.srt`:
 
 - `<same name as the .srt>.words.json` - every script word with `word`, `start`, `end` (seconds), `confidence`, `heard`,
   `heard_as` and `line`;
@@ -225,6 +231,10 @@ Tick **More options > Also save every word's timing** to also get:
 ```
 python scriptsync_core.py clip.mp4 script.docx -o out_folder --model small --max-chars 40
 ```
+
+The command line has no "Save as" step, so it writes the `.srt` (and `--words` files) next to the clip, or into
+the `-o` folder if you give one. The review sheet always goes to ScryptSync's `reviews` folder, so nothing but
+the `.srt` lands in your project. It prints the path of every file it wrote.
 
 More options: `--fps 25` (frame rate to snap to; default `auto` = the clip's own, `0` = don't snap), `--max-words 4`, `--words` (also write the word-timing files), `--print-prompt` (print the AI-tool
 prompt for this script and exit) and `--line-breaks recut.txt` (use your own line breaks; checked against the script).
@@ -275,7 +285,7 @@ how fast listening was).
 | SS-402 | Listening took longer than the clip itself | Choose a faster model (More options > Listening), and see *Slow syncing* below. |
 | SS-403 | Couldn't look for cuts in the video | The video may be damaged; subtitles are still made, just not snapped to cuts. |
 | SS-404 | Less than 40% of the script was found in the audio | Check it's the right script and language, and that music isn't drowning out the voice. |
-| SS-501 | The subtitle files couldn't be saved | The folder is read-only or full: choose another output folder. |
+| SS-501 | The subtitle files couldn't be saved | The folder is read-only or full: pick another place in **Save as .srt** (or another `-o` folder), or free up space on the drive that holds ScryptSync's own folder. |
 | SS-900 | Unexpected error (a bug) | Please report it with the diagnostic info. |
 
 ### Slow syncing / graphics card not used

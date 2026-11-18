@@ -270,12 +270,60 @@ def test_line_breaks_run_job_reuses_transcript():
         assert os.path.exists(res2.words_json_path) and os.path.exists(res2.words_srt_path)
         assert res1.srt_path != res2.srt_path and os.path.exists(res1.srt_path), "earlier sync overwritten"
         assert os.path.basename(res2.srt_path).startswith("clip_synced_40ch_0w_30fps_")
-        assert res2.report_path == res2.srt_path[:-4] + ".review.txt"
+        assert res2.report_path == os.path.join(review_dir(), os.path.basename(res2.srt_path)[:-4] + ".review.txt")
         assert "your line breaks" in res2.report_text
         try:
             run_job(Job(clip, script_text=script, line_breaks="Hello friends,\nwelcome."), s); assert False
         except SyncError as e:
             assert "don't match" in str(e)
+    finally:
+        for k, v in old_env.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+
+
+def test_outputs_stay_out_of_the_clip_folder():
+    """A sync writes nothing beside the clip: the review sheet goes to the app's reviews folder, the .srt (and
+    word timings) to its working folder. Only save_srt_as (the app's "Save as .srt") puts a file in the
+    project; an explicit output folder (the command line's -o) still gets the .srt."""
+    import tempfile
+    clips, appdata, mine = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+    clip = os.path.join(clips, "clip.mp4"); open(clip, "wb").write(b"not really a video")
+    plugin = os.path.join(appdata, "plugin.py")
+    open(plugin, "w").write(
+        "def transcribe(path, language, hint, progress, cancel):\n"
+        "    words, t = [], 0.5\n"
+        "    for w in 'one two three four five six'.split():\n"
+        "        words.append((w, t, t + 0.3, 0.9)); t += 0.35\n"
+        "    return words, t + 0.5, 'en'\n")
+    old_env = {k: os.environ.get(k) for k in ("SCRIPTSYNC_ASR_PLUGIN", "LOCALAPPDATA")}
+    os.environ["SCRIPTSYNC_ASR_PLUGIN"] = plugin
+    os.environ["LOCALAPPDATA"] = appdata
+    try:
+        s = Settings(export_words=True)
+        res = run_job(Job(clip, script_text="one two three\nfour five six"), s)
+        assert os.listdir(clips) == ["clip.mp4"], os.listdir(clips)
+        assert os.path.dirname(res.srt_path) == working_dir() and os.path.exists(res.srt_path)
+        assert os.path.dirname(res.words_json_path) == working_dir()
+        assert os.path.dirname(res.report_path) == review_dir() and os.path.exists(res.report_path)
+        assert working_dir().startswith(app_data_dir()) and review_dir().startswith(app_data_dir())
+        assert previous_outputs(clip) == [res.srt_path], "the working copy counts as an earlier sync"
+        # Save as .srt: the subtitles and their word timings, under the name the user picked
+        written = save_srt_as(res, os.path.join(clips, "final"))
+        assert written == [os.path.join(clips, n) for n in ("final.srt", "final.words.json", "final.words.srt")]
+        assert open(written[0], encoding="utf-8", newline="").read() == res.srt_text
+        assert sorted(os.listdir(clips)) == ["clip.mp4", "final.srt", "final.words.json", "final.words.srt"]
+        # an explicit output folder gets the .srt; the review sheet still goes to the reviews folder
+        res2 = run_job(Job(clip, script_text="one two three\nfour five six", out_dir=mine), s)
+        assert os.path.dirname(res2.srt_path) == mine and os.path.dirname(res2.report_path) == review_dir()
+        assert not any(f.endswith(".review.txt") for f in os.listdir(mine))
+        # the working folder and review sheets are a cache: old ones are dropped, saved copies never
+        old = time.time() - (OUTPUT_KEEP_DAYS + 1) * 86400
+        for p in (res.srt_path, res.report_path, written[0]):
+            os.utime(p, (old, old))
+        prune_old_outputs()
+        assert not os.path.exists(res.srt_path) and not os.path.exists(res.report_path)
+        assert os.path.exists(written[0]) and os.path.exists(res2.report_path)
     finally:
         for k, v in old_env.items():
             if v is None: os.environ.pop(k, None)
@@ -489,7 +537,13 @@ def test_recut_from_saved_word_timings():
     assert [(c.text, c.start, c.end) for c in short.cues] == [(c.text, c.start, c.end) for c in fresh.cues]
     assert all(len(c.text) <= 18 or len(c.text.split()) == 1 for c in short.cues)
     assert len(base.cues) < len(short.cues) and base.settings.max_chars == 40, "the original is untouched"
-    write_result(short)
+    old_env = os.environ.get("LOCALAPPDATA")
+    os.environ["LOCALAPPDATA"] = d                      # the review sheet goes to the app's folder: a temporary one
+    try:
+        write_result(short)
+    finally:
+        if old_env is None: os.environ.pop("LOCALAPPDATA", None)
+        else: os.environ["LOCALAPPDATA"] = old_env
     assert os.path.basename(short.srt_path).startswith("clip_synced_18ch_4w_") and os.path.exists(short.srt_path)
     assert os.path.exists(short.report_path) and short.srt_text == open(short.srt_path, encoding="utf-8", newline="").read()
 

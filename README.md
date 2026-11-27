@@ -178,10 +178,13 @@ Subtitle shape.
   language: auto-detect, English, Tagalog/Filipino, Spanish.
 - **Frame rate** (per clip, in the clip panel) - subtitle times are snapped to whole frames of each clip's own
   frame rate, read from the video. Pick a rate to override it, or **Don't snap**. Audio-only clips use the default
-  under More options (30). Subtitles in continuous speech always touch, so they never blink.
+  under More options (30). Subtitles in continuous speech always touch, so they never blink, and each one stays
+  up at least 0.3 s, so a very short word never flashes by.
+- **Editing in Premiere Pro** (next to Sync, off by default) - Premiere drops a subtitle that starts at exactly
+  `00:00:00,000`, so with this on a first subtitle at zero starts at `00:00:00,067` instead. Leave it off for
+  other editors. On the command line: `--premiere-fix`.
 - **More options…** (a separate window) - ignore `[bracketed notes]`, strip `Name:` speaker labels, keep or re-flow
-  the writer's line breaks, name hints for the listener, a Premiere fix (Premiere can drop a first cue that starts
-  at exactly `00:00:00,000`, so it starts at `00:00:00,067`), include never-heard lines, word timings, transcript
+  the writer's line breaks, name hints for the listener, include never-heard lines, word timings, transcript
   re-use, the speech model folder, and Troubleshooting.
 
 Styling (font, size, position, colours) is done in your editor; the SRT carries text and timing only.

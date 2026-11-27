@@ -967,6 +967,46 @@ def test_quiet_voice_is_raised_before_listening():
     assert quiet > loud / 3, f"quiet part still {20 * np.log10(loud / quiet):.0f} dB below the loud part"
 
 
+def test_footnote_markers_in_the_script_dont_crash():
+    """A superscript footnote marker ("¹$4.99") counts as a digit for Python but int() can't read it:
+    the sync crashed. It is not spoken, so it is skipped."""
+    assert tokens_for("¹$4.99") == tokens_for("$4.99")
+    assert tokens_for("price²") == tokens_for("price")
+    asr, _, end = speak(["it costs four dollars ninety nine"])
+    res = sync_words(parse_script("It costs ¹$4.99", Settings()), asr, end, Settings())
+    assert res.cues and "¹$4.99" in res.cues[0].text
+
+
+def test_a_fast_short_word_never_flashes_by():
+    """Reported: subtitles blinked (vanished and came back within a frame) in fast speech. "There" took
+    60 ms to say and was split off alone ("There | will be 195,000"); the next cue touched it, so it was
+    on screen for one frame. Each cue now stays up at least min_show_seconds."""
+    from scriptsync_core import _finalize_times
+    for fps in (24.0, 30.0):
+        s = Settings(fps=fps, max_chars=18, max_words=4)
+        asr = [AsrWord("There", 1.00, 1.06), AsrWord("will", 1.06, 1.20), AsrWord("be", 1.20, 1.30),
+               AsrWord("195,000", 1.30, 2.10), AsrWord("people", 2.12, 2.50)]
+        res = sync_words(parse_script("There will be 195,000 people.", s), asr, 3.0, s)
+        assert all(c.end - c.start >= s.min_show_seconds - 1e-6 for c in res.cues),             [(c.text, c.start, c.end) for c in res.cues]
+        assert res.cues[0].text != "There", [c.text for c in res.cues]
+        # timing alone: a 1-frame cue touching the next one is held, the next starts later
+        cues = [_cue(1.0, 1.0 + 1 / fps), _cue(1.0 + 1 / fps, 3.0)]
+        _finalize_times(cues, s, 5.0, None)
+        assert cues[0].end - cues[0].start >= s.min_show_seconds - 1e-6, (cues[0].start, cues[0].end)
+        assert abs(cues[0].end - cues[1].start) < 1e-6 and cues[1].end - cues[1].start >= s.min_show_seconds
+
+
+def test_premiere_fix_is_off_unless_asked_for():
+    """Most users don't edit in Premiere: the first cue may start at 0 unless the Premiere fix is on
+    (GUI checkbox next to Sync, --premiere-fix on the command line)."""
+    assert Settings().premiere_zero_fix is False
+    from scriptsync_core import _finalize_times
+    for on, start in ((False, 0.0), (True, 0.067)):
+        cues = [_cue(0.0, 1.5)]
+        _finalize_times(cues, Settings(fps=30.0, premiere_zero_fix=on), 5.0, None)
+        assert abs(cues[0].start - start) < 1e-6, (on, cues[0].start)
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

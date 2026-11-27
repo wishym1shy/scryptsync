@@ -973,8 +973,10 @@ def test_footnote_markers_in_the_script_dont_crash():
     assert tokens_for("¹$4.99") == tokens_for("$4.99")
     assert tokens_for("price²") == tokens_for("price")
     asr, _, end = speak(["it costs four dollars ninety nine"])
-    res = sync_words(parse_script("It costs ¹$4.99", Settings()), asr, end, Settings())
-    assert res.cues and "¹$4.99" in res.cues[0].text
+    for strip, shown in ((False, "¹$4.99"), (True, "It costs $4.99")):     # kept as written, or removed
+        s = Settings(strip_footnotes=strip)
+        res = sync_words(parse_script("It costs ¹$4.99", s), asr, end, s)
+        assert res.cues and shown in res.cues[0].text, [c.text for c in res.cues]
 
 
 def test_a_fast_short_word_never_flashes_by():
@@ -1005,6 +1007,40 @@ def test_premiere_fix_is_off_unless_asked_for():
         cues = [_cue(0.0, 1.5)]
         _finalize_times(cues, Settings(fps=30.0, premiere_zero_fix=on), 5.0, None)
         assert abs(cues[0].start - start) < 1e-6, (on, cues[0].start)
+
+
+def test_footnote_markers_are_removed_from_the_subtitles():
+    """Writers mark footnotes/sources with superscript numbers or letters; they're not said and shouldn't
+    show. On by default; ordinals and squared/cubed units are kept; off keeps the script as written."""
+    s = Settings()
+    assert s.strip_footnotes is True
+    assert parse_script("It costs $4.99\u00b9 today", s) == ["It costs $4.99 today"]
+    assert parse_script("Studies show\u00b2\u1d43 it works \u00b3", s) == ["Studies show it works"]
+    assert parse_script("\u00b9$4.99", s) == ["$4.99"]
+    assert parse_script("The 1\u02e2\u1d57 and 2\u207f\u1d48 of 50 m\u00b2, 3ft\u00b3", s) == \
+        ["The 1\u02e2\u1d57 and 2\u207f\u1d48 of 50 m\u00b2, 3ft\u00b3"]
+    assert parse_script("La 1\u00aa vez, Brand\u2122", s) == ["La 1\u00aa vez, Brand\u2122"]   # not markers
+    assert parse_script("It costs $4.99\u00b9", Settings(strip_footnotes=False)) == ["It costs $4.99\u00b9"]
+    asr, _, end = speak(["it costs four dollars ninety nine today"])
+    res = sync_words(parse_script("It costs $4.99\u00b9 today", s), asr, end, s)
+    assert [c.text for c in res.cues] == ["It costs $4.99 today"], [c.text for c in res.cues]
+
+
+def test_word_superscript_formatting_counts_as_a_footnote_marker():
+    """In Word/Google Docs a footnote marker is usually a normal "1" formatted as superscript. Read as
+    plain text it would join the word ("works1"); it is read as "works\u00b9" and then removed."""
+    import tempfile, zipfile
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    xml = (f'<w:document {w}><w:body><w:p><w:r><w:t xml:space="preserve">It works</w:t></w:r>'
+           '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>12</w:t></w:r>'
+           '<w:r><w:t xml:space="preserve"> every time.</w:t></w:r></w:p></w:body></w:document>')
+    path = os.path.join(tempfile.mkdtemp(), "script.docx")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", xml)
+    text = read_script_file(path)
+    assert text == "It works\u00b9\u00b2 every time.", repr(text)
+    assert parse_script(text, Settings()) == ["It works every time."]
+    assert parse_script(text, Settings(strip_footnotes=False)) == ["It works\u00b9\u00b2 every time."]
 
 
 if __name__ == "__main__":

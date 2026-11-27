@@ -183,6 +183,9 @@ Subtitle shape.
 - **Editing in Premiere Pro** (next to Sync, off by default) - Premiere drops a subtitle that starts at exactly
   `00:00:00,000`, so with this on a first subtitle at zero starts at `00:00:00,067` instead. Leave it off for
   other editors. On the command line: `--premiere-fix`.
+- **Remove footnote markers** (under it, on by default) - the small raised numbers and letters writers add for
+  footnotes or sources (`$4.99¹`, `show²ᵃ`) are left out of the subtitles. Ordinals (`1ˢᵗ`) and units (`m²`) are
+  kept. In a Word file, text formatted as superscript counts too. On the command line: `--keep-footnotes` keeps them.
 - **More options…** (a separate window) - ignore `[bracketed notes]`, strip `Name:` speaker labels, keep or re-flow
   the writer's line breaks, name hints for the listener, include never-heard lines, word timings, transcript
   re-use, the speech model folder, and Troubleshooting.

@@ -34,6 +34,7 @@ import math
 import os
 import platform
 import re
+import unicodedata
 import shutil
 import statistics
 import subprocess
@@ -265,6 +266,7 @@ class Settings:
     # script reading
     ignore_brackets: bool = True    # drop [stage directions]
     strip_speaker_labels: bool = False   # drop "Name:" at line start
+    strip_footnotes: bool = True    # drop footnote markers (superscript ¹ ² ³ ᵃ ᵇ) from the subtitles
     keep_script_lines: bool = True  # one cue per script line (split only if too long)
     # cue shape
     max_chars: int = 40             # max characters in one cue
@@ -426,13 +428,18 @@ def _read_docx(path: str) -> str:
     lines = []
     for p in root.iter(_W + "p"):
         buf = []
-        for el in p.iter():
-            if el.tag == _W + "t" and el.text:
-                buf.append(el.text)
-            elif el.tag == _W + "tab":
-                buf.append(" ")
-            elif el.tag in (_W + "br", _W + "cr"):
-                buf.append("\n")
+        for r in p.iter(_W + "r"):
+            # Text formatted as superscript (a footnote marker typed as "1" and raised) becomes real
+            # superscript characters, so it stays apart from the word ("works¹", not "works1").
+            va = r.find(f"{_W}rPr/{_W}vertAlign")
+            sup = va is not None and va.get(_W + "val") == "superscript"
+            for el in r:
+                if el.tag == _W + "t" and el.text:
+                    buf.append(el.text.translate(_TO_SUPER) if sup else el.text)
+                elif el.tag == _W + "tab":
+                    buf.append(" ")
+                elif el.tag in (_W + "br", _W + "cr"):
+                    buf.append("\n")
         lines.append("".join(buf))
     return "\n".join(lines)
 
@@ -468,6 +475,41 @@ _ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
 _LABEL = re.compile(r"^\s*[A-Z][\w.'\-]*(?:\s[A-Z][\w.'\-]*)?\s*:\s+")
 
 
+def _superscripts() -> str:
+    """Superscript digits and letters (¹ ² ³ ⁴ ᵃ ᵇ ᴬ ⁿ ...), the marks writers put after a word for a
+    footnote or source. Not ª º (Spanish ordinals: 1ª) or ™ (two letters)."""
+    out = []
+    for cp in list(range(0x00A0, 0x0300)) + list(range(0x1D00, 0x2100)) + list(range(0xA690, 0xAB70)):
+        ch = chr(cp)
+        d = unicodedata.decomposition(ch)
+        if d.startswith("<super> ") and len(d.split()) == 2 and ch not in "ªº":
+            if unicodedata.normalize("NFKC", ch).isalnum():
+                out.append(ch)
+    return "".join(out)
+
+
+_SUPERSCRIPTS = _superscripts()
+_SUPER_RUN = re.compile("[" + re.escape(_SUPERSCRIPTS) + "]+")
+_TO_SUPER = {}                      # "1" -> "¹", "a" -> "ᵃ" (for text a Word file formats as superscript)
+for _ch in _SUPERSCRIPTS:
+    _TO_SUPER.setdefault(ord(unicodedata.normalize("NFKC", _ch)), _ch)
+_UNIT_BEFORE = re.compile(r"\d\s?(?:mm|cm|m|km|in|ft|yd|mi)$", re.I)
+
+
+def strip_footnotes(line: str) -> str:
+    """Drop footnote markers ("costs $4.99¹", "studies show²ᵃ") from a script line. Kept: ordinals
+    (1ˢᵗ, 2ⁿᵈ) and squared/cubed units (50 m², 3 ft³), which are part of what's said."""
+    def keep_or_drop(m):
+        plain = unicodedata.normalize("NFKC", m.group(0)).lower()
+        before = line[:m.start()]
+        if plain in ("st", "nd", "rd", "th") and before[-1:].isdigit():
+            return m.group(0)
+        if plain in ("2", "3") and _UNIT_BEFORE.search(before):
+            return m.group(0)
+        return ""
+    return _SUPER_RUN.sub(keep_or_drop, line)
+
+
 def parse_script(text: str, s: Settings) -> list:
     """Raw script text -> list of cleaned lines (strings)."""
     text = text.translate(_ZW).replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
@@ -479,6 +521,8 @@ def parse_script(text: str, s: Settings) -> list:
             ln = re.sub(r"\[[^\]]*\]", " ", ln)
         if s.strip_speaker_labels:
             ln = _LABEL.sub("", ln)
+        if s.strip_footnotes:
+            ln = strip_footnotes(ln)
         ln = re.sub(r"\s+", " ", ln).strip()
         if ln and re.search(r"\w", ln):
             lines.append(ln)
@@ -2258,6 +2302,9 @@ def main(argv=None):
     ap.add_argument("--premiere-fix", action="store_true",
                     help="for Premiere Pro: start the first subtitle at 00:00:00,067 instead of 00:00:00,000 "
                          "(Premiere drops a subtitle that starts at exactly zero)")
+    ap.add_argument("--keep-footnotes", action="store_true",
+                    help="keep footnote markers (superscript ¹ ² ᵃ) in the subtitles; "
+                         "by default they're removed")
     ap.add_argument("-v", "--verbose", action="store_true", help="also print the log to the terminal")
     a = ap.parse_args(argv)
     setup_logging(console=a.verbose)
@@ -2271,6 +2318,7 @@ def main(argv=None):
             ap.error("--fps must be 'auto' or a number")
     s = Settings(model=a.model, language=a.language, max_chars=a.max_chars, use_cache=not a.no_cache,
                  snap_to_cuts=not a.no_cut_snap, premiere_zero_fix=a.premiere_fix,
+                 strip_footnotes=not a.keep_footnotes,
                  model_dir=a.model_dir, max_words=a.max_words, export_words=a.words)
     if a.print_prompt:
         try:

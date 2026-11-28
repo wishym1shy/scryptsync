@@ -34,6 +34,7 @@ import math
 import os
 import platform
 import re
+import unicodedata
 import shutil
 import statistics
 import subprocess
@@ -48,7 +49,7 @@ from typing import Callable, Optional
 APP_NAME = "ScryptSync"
 APP_AUTHOR = "wishym1shy"
 APP_URL = "https://github.com/wishym1shy/scryptsync"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 # Python versions the app can be installed on: the speech engine's dependencies have ready-made
 # packages for these. Python 3.15 is left out until onnxruntime ships for it (CI's "installable"
 # check says when). run_windows.bat and run_mac.command list the same range; tests/test_core.py checks.
@@ -265,6 +266,7 @@ class Settings:
     # script reading
     ignore_brackets: bool = True    # drop [stage directions]
     strip_speaker_labels: bool = False   # drop "Name:" at line start
+    strip_footnotes: bool = True    # drop footnote markers (superscript ¹ ² ³ ᵃ ᵇ) from the subtitles
     keep_script_lines: bool = True  # one cue per script line (split only if too long)
     # cue shape
     max_chars: int = 40             # max characters in one cue
@@ -275,9 +277,12 @@ class Settings:
     tail_hold: float = 0.12         # linger after the last word
     lead_in: float = 0.0            # show cue this much earlier than the first word
     min_gap: float = 0.1            # a gap shorter than this between cues is closed (it reads as a blink)
+    min_show_seconds: float = 0.3   # even in fast continuous speech, a cue stays up at least this long
+                                    # (a shorter one flashes: the subtitle seems to vanish and come back)
     fps: float = 30.0               # frame rate for clips that have none (audio files) or when not matching clips
     match_clip_fps: bool = True     # snap to each clip's own frame rate (read from the video) when it has one
-    premiere_zero_fix: bool = True  # Premiere quirk: it drops a cue that starts at 00:00:00,000
+    premiere_zero_fix: bool = False  # Premiere quirk: it drops a cue that starts at 00:00:00,000 (off unless
+                                     # the user edits in Premiere: other editors show a cue at 0 just fine)
     include_unheard: bool = False   # keep cues for text that was never heard (timing = guess)
     export_words: bool = False      # also write <output>.words.json and <output>.words.srt (one word per cue)
     snap_to_cuts: bool = True       # move a subtitle change that is a few frames off a video cut onto the cut
@@ -423,13 +428,18 @@ def _read_docx(path: str) -> str:
     lines = []
     for p in root.iter(_W + "p"):
         buf = []
-        for el in p.iter():
-            if el.tag == _W + "t" and el.text:
-                buf.append(el.text)
-            elif el.tag == _W + "tab":
-                buf.append(" ")
-            elif el.tag in (_W + "br", _W + "cr"):
-                buf.append("\n")
+        for r in p.iter(_W + "r"):
+            # Text formatted as superscript (a footnote marker typed as "1" and raised) becomes real
+            # superscript characters, so it stays apart from the word ("works¹", not "works1").
+            va = r.find(f"{_W}rPr/{_W}vertAlign")
+            sup = va is not None and va.get(_W + "val") == "superscript"
+            for el in r:
+                if el.tag == _W + "t" and el.text:
+                    buf.append(el.text.translate(_TO_SUPER) if sup else el.text)
+                elif el.tag == _W + "tab":
+                    buf.append(" ")
+                elif el.tag in (_W + "br", _W + "cr"):
+                    buf.append("\n")
         lines.append("".join(buf))
     return "\n".join(lines)
 
@@ -465,6 +475,41 @@ _ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
 _LABEL = re.compile(r"^\s*[A-Z][\w.'\-]*(?:\s[A-Z][\w.'\-]*)?\s*:\s+")
 
 
+def _superscripts() -> str:
+    """Superscript digits and letters (¹ ² ³ ⁴ ᵃ ᵇ ᴬ ⁿ ...), the marks writers put after a word for a
+    footnote or source. Not ª º (Spanish ordinals: 1ª) or ™ (two letters)."""
+    out = []
+    for cp in list(range(0x00A0, 0x0300)) + list(range(0x1D00, 0x2100)) + list(range(0xA690, 0xAB70)):
+        ch = chr(cp)
+        d = unicodedata.decomposition(ch)
+        if d.startswith("<super> ") and len(d.split()) == 2 and ch not in "ªº":
+            if unicodedata.normalize("NFKC", ch).isalnum():
+                out.append(ch)
+    return "".join(out)
+
+
+_SUPERSCRIPTS = _superscripts()
+_SUPER_RUN = re.compile("[" + re.escape(_SUPERSCRIPTS) + "]+")
+_TO_SUPER = {}                      # "1" -> "¹", "a" -> "ᵃ" (for text a Word file formats as superscript)
+for _ch in _SUPERSCRIPTS:
+    _TO_SUPER.setdefault(ord(unicodedata.normalize("NFKC", _ch)), _ch)
+_UNIT_BEFORE = re.compile(r"\d\s?(?:mm|cm|m|km|in|ft|yd|mi)$", re.I)
+
+
+def strip_footnotes(line: str) -> str:
+    """Drop footnote markers ("costs $4.99¹", "studies show²ᵃ") from a script line. Kept: ordinals
+    (1ˢᵗ, 2ⁿᵈ) and squared/cubed units (50 m², 3 ft³), which are part of what's said."""
+    def keep_or_drop(m):
+        plain = unicodedata.normalize("NFKC", m.group(0)).lower()
+        before = line[:m.start()]
+        if plain in ("st", "nd", "rd", "th") and before[-1:].isdigit():
+            return m.group(0)
+        if plain in ("2", "3") and _UNIT_BEFORE.search(before):
+            return m.group(0)
+        return ""
+    return _SUPER_RUN.sub(keep_or_drop, line)
+
+
 def parse_script(text: str, s: Settings) -> list:
     """Raw script text -> list of cleaned lines (strings)."""
     text = text.translate(_ZW).replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
@@ -476,6 +521,8 @@ def parse_script(text: str, s: Settings) -> list:
             ln = re.sub(r"\[[^\]]*\]", " ", ln)
         if s.strip_speaker_labels:
             ln = _LABEL.sub("", ln)
+        if s.strip_footnotes:
+            ln = strip_footnotes(ln)
         ln = re.sub(r"\s+", " ", ln).strip()
         if ln and re.search(r"\w", ln):
             lines.append(ln)
@@ -516,8 +563,16 @@ def _number_words(num: str) -> list:
     return _int_words(n) if n < 10 ** 15 else [num]
 
 
+def _not_spoken(ch: str) -> bool:
+    """Footnote markers and the like (superscript ¹²³, subscript, circled digits). Python counts them as
+    digits (isdigit) but int() can't read them, and nobody says them out loud. A script with "¹$4.99"
+    crashed the sync."""
+    return ch.isdigit() and not ch.isdecimal()
+
+
 def tokens_for(word: str) -> list:
-    w = word.lower().replace("\u2019", "'").replace("\u2018", "'")
+    w = "".join(ch for ch in word if not _not_spoken(ch))
+    w = w.lower().replace("\u2019", "'").replace("\u2018", "'")
     w = re.sub(r"(?<=\d),(?=\d)", "", w)
     w = re.sub(r"(?<=\d)-(?=\d)", "/", w)
     out = []
@@ -527,7 +582,7 @@ def tokens_for(word: str) -> list:
         i = 0
         while i < len(pieces):
             p = pieces[i]
-            if p[0].isdigit():
+            if p[0].isdecimal():
                 out.extend(_number_words(p))
                 if i > 0 and pieces[i - 1] == "$":
                     out.append("dollars")
@@ -882,6 +937,7 @@ COST_NEW_CUE = 100.0      # every extra subtitle line
 COST_GLUE_END = 110.0     # ending a line on a word that can't stand without the next one ("the | car", "will | be")
 COST_SOFT_GLUE_END = 95.0  # ... on a preposition or conjunction, which reads less badly ("walk you through | it")
 COST_LONE_WORD = 90.0     # a word alone on its line ("Yes." as a whole sentence is fine)
+COST_FLASH = 150.0        # a cue whose words take (almost) no time to say: it would flash by (scaled by how short)
 
 
 def _break_cost(ws: list, j: int, n: int) -> float:
@@ -960,6 +1016,10 @@ def _split_words(ws: list, s: Settings) -> list:
             c += 400 * joins                        # two sentences in one cue
             if j - i == 1 and n > 1 and not (sent_end[i] and (i == 0 or sent_end[i - 1])):
                 c += COST_LONE_WORD                 # a word alone on its line ("Yes." as a whole sentence is fine)
+            if n > 1 and s.min_show_seconds > 0:    # "There | will be 195,000": "There" is 60 ms of speech
+                short = s.min_show_seconds - (ws[j - 1].end - ws[i].start)
+                if short > 0:
+                    c += COST_FLASH * min(short / s.min_show_seconds, 1.0)
             if best[i] + c < best[j]:
                 best[j] = best[i] + c
                 back[j] = i
@@ -1056,12 +1116,38 @@ def _finalize_times(cues: list, s: Settings, duration: float, cuts: Optional[lis
             if nxt is not None and end > nxt:             # crowded cues: never overlap the next one
                 end = max(nxt, c.start)
         c.end = end
+    _hold_flashes(cues, s, frame)
     stats = _snap_to_cuts(cues, cuts, s, duration) if (cuts and s.snap_to_cuts) else None
     if s.premiere_zero_fix and cues and cues[0].start < 0.067:
         cues[0].start = 0.067
         if cues[0].end < cues[0].start + 0.05:
             cues[0].end = cues[0].start + 0.05
     return stats
+
+
+def _hold_flashes(cues: list, s: Settings, frame: float):
+    """Keep a cue that is followed straight away by the next one up for at least ``min_show_seconds``.
+
+    In fast speech a cue's words can take a frame or two to say ("There" in "There | will be 195,000" was
+    60 ms), and with the next cue touching it, min_cue_seconds never applies: the cue showed for one frame,
+    so the subtitle seemed to vanish and come straight back. The next cue starts a little later instead
+    (a few frames behind its words), as long as it keeps at least ``min_show_seconds`` itself."""
+    want = s.min_show_seconds
+    if want <= 0:
+        return
+
+    def ceil_frame(t):
+        return math.ceil(t * s.fps - 1e-6) / s.fps if frame else t
+
+    def floor_frame(t):
+        return math.floor(t * s.fps + 1e-6) / s.fps if frame else t
+
+    for c, nx in zip(cues, cues[1:]):
+        if abs(c.end - nx.start) > 1e-6 or c.end - c.start >= want - 1e-6:
+            continue                        # not touching (a gap already gives min_cue_seconds), or long enough
+        new = min(ceil_frame(c.start + want), floor_frame(nx.end - want))
+        if new > c.end + 1e-6:
+            c.end = nx.start = new
 
 
 _NEAR_CUT = "changes "          # start of the note on a subtitle change left near a cut
@@ -2213,6 +2299,12 @@ def main(argv=None):
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--no-cut-snap", action="store_true",
                     help="don't move subtitle changes onto nearby video cuts")
+    ap.add_argument("--premiere-fix", action="store_true",
+                    help="for Premiere Pro: start the first subtitle at 00:00:00,067 instead of 00:00:00,000 "
+                         "(Premiere drops a subtitle that starts at exactly zero)")
+    ap.add_argument("--keep-footnotes", action="store_true",
+                    help="keep footnote markers (superscript ¹ ² ᵃ) in the subtitles; "
+                         "by default they're removed")
     ap.add_argument("-v", "--verbose", action="store_true", help="also print the log to the terminal")
     a = ap.parse_args(argv)
     setup_logging(console=a.verbose)
@@ -2225,7 +2317,8 @@ def main(argv=None):
         except ValueError:
             ap.error("--fps must be 'auto' or a number")
     s = Settings(model=a.model, language=a.language, max_chars=a.max_chars, use_cache=not a.no_cache,
-                 snap_to_cuts=not a.no_cut_snap,
+                 snap_to_cuts=not a.no_cut_snap, premiere_zero_fix=a.premiere_fix,
+                 strip_footnotes=not a.keep_footnotes,
                  model_dir=a.model_dir, max_words=a.max_words, export_words=a.words)
     if a.print_prompt:
         try:

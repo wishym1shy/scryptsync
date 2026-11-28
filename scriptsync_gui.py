@@ -242,8 +242,8 @@ def reveal(path):
 class _Tooltip:
     """Small hover hint for a widget."""
 
-    def __init__(self, widget, text):
-        self.widget, self.text, self.tip = widget, text, None
+    def __init__(self, widget, text, wrap=0):
+        self.widget, self.text, self.tip, self.wrap = widget, text, None, wrap
         widget.bind("<Enter>", self.show, add="+")
         widget.bind("<Leave>", self.hide, add="+")
 
@@ -254,7 +254,7 @@ class _Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         tk.Label(self.tip, text=self.text, bg=P["tip_bg"], fg=P["tip_text"], padx=8, pady=4,
-                 font=("Segoe UI", 9)).pack()
+                 font=("Segoe UI", 9), wraplength=self.wrap, justify="left").pack()
         self.tip.update_idletasks()
         # right-aligned under the widget, so it stays inside the window
         x = self.widget.winfo_rootx() + self.widget.winfo_width() - self.tip.winfo_width()
@@ -594,7 +594,8 @@ class App(tk.Tk):
         self.v_brackets = tk.BooleanVar(value=True)
         self.v_labels = tk.BooleanVar(value=False)
         self.v_lines = tk.BooleanVar(value=True)
-        self.v_zero = tk.BooleanVar(value=True)
+        self.v_zero = tk.BooleanVar(value=False)    # Premiere fix: off unless the user edits in Premiere
+        self.v_footnotes = tk.BooleanVar(value=True)  # remove footnote markers (¹ ² ᵃ) from the subtitles
         self.v_cuts = tk.BooleanVar(value=True)
         self.v_prime = tk.BooleanVar(value=True)
         self.v_unheard = tk.BooleanVar(value=False)
@@ -690,6 +691,31 @@ class App(tk.Tk):
         self.btn_save_all.pack(side="left")
         _Tooltip(self.btn_save_all, "Save every synced clip's .srt at once: beside each clip, "
                                     "or in the Save .srt to folder if one is set")
+        # Two output switches people should see, stacked beside Sync.
+        sw = ttk.Frame(rf)
+        sw.pack(side="left", padx=(12, 0))
+        # Off by default (most users aren't on Premiere), but kept beside Sync so Premiere users see it.
+        self.chk_premiere = ttk.Checkbutton(sw, text="Editing in Premiere Pro", variable=self.v_zero,
+                                            command=self._save_settings)
+        self.chk_premiere.pack(anchor="w")
+        _Tooltip(self.chk_premiere,
+                 "Turn this on if you'll import the subtitles into Adobe Premiere Pro.\n\n"
+                 "Premiere drops a subtitle that starts at exactly 00:00:00,000, so the clip's first line "
+                 "would go missing. With this on, a first subtitle that starts at zero starts at "
+                 "00:00:00,067 (a split second later) instead. Nothing else changes.\n\n"
+                 "Leave it off for DaVinci Resolve, Final Cut, CapCut and other editors.", wrap=360)
+        self.chk_footnotes = ttk.Checkbutton(sw, text="Remove footnote markers", variable=self.v_footnotes,
+                                             command=self._save_settings)
+        self.chk_footnotes.pack(anchor="w")
+        _Tooltip(self.chk_footnotes,
+                 "Removes the small raised numbers and letters writers add for footnotes or sources, "
+                 "so they don't show in the subtitles:\n\n"
+                 "    “It costs $4.99¹”  →  “It costs $4.99”\n"
+                 "    “Studies show²ᵃ it works”  →  “Studies show it works”\n\n"
+                 "Ordinals and units are kept: 1ˢᵗ, 2ⁿᵈ, 50 m², 3 ft³.\n\n"
+                 "Only raised characters count. If your script has footnote numbers written as normal "
+                 "text (like “works[1]”), use “Ignore [bracketed notes]” under More options.\n\n"
+                 "Turn this off to keep the script's characters exactly as written.", wrap=380)
         self.progress = ttk.Progressbar(rf, maximum=1000)
         self.progress.pack(side="left", fill="x", expand=True, padx=(12, 0))
 
@@ -1227,7 +1253,6 @@ class App(tk.Tk):
         ttk.Label(body, text="Subtitles", style="Section.TLabel").grid(row=r, column=0, sticky="w", pady=(12, 0))
         r += 1
         for v, txt in ((self.v_cuts, "Snap subtitle changes to video cuts (when one is a few frames away)"),
-                       (self.v_zero, "Premiere fix: never start the first subtitle at 00:00:00,000"),
                        (self.v_unheard, "Also include lines that were never heard (timing is a guess)"),
                        (self.v_words, "Also save every word's timing (.words.json / .words.srt) for other tools")):
             ttk.Checkbutton(body, text=txt, variable=v).grid(row=r, column=0, columnspan=3, sticky="w", pady=1)
@@ -1302,6 +1327,7 @@ class App(tk.Tk):
             fps=FRAME_RATES.get(self.v_fps.get(), 30.0),
             ignore_brackets=self.v_brackets.get(),
             strip_speaker_labels=self.v_labels.get(),
+            strip_footnotes=self.v_footnotes.get(),
             keep_script_lines=self.v_lines.get(),
             premiere_zero_fix=self.v_zero.get(),
             snap_to_cuts=self.v_cuts.get(),
@@ -1314,7 +1340,7 @@ class App(tk.Tk):
     def _save_settings(self):
         data = {"model": self.var_model.get(), "lang": self.var_lang.get(), "maxc": self.var_maxchars.get(),
                 "out": self.var_out.get(), "brackets": self.v_brackets.get(), "labels": self.v_labels.get(),
-                "lines": self.v_lines.get(), "zero": self.v_zero.get(), "cuts": self.v_cuts.get(), "prime": self.v_prime.get(),
+                "lines": self.v_lines.get(), "premiere": self.v_zero.get(), "footnotes": self.v_footnotes.get(), "cuts": self.v_cuts.get(), "prime": self.v_prime.get(),
                 "unheard": self.v_unheard.get(), "cache": self.v_cache.get(),
                 "mincue": self.v_mincue.get(), "bridge": self.v_bridge.get(), "maxsec": self.v_maxsec.get(),
                 "fps": self.v_fps.get(), "modeldir": self.v_modeldir.get(), "appearance": self.appearance,
@@ -1338,7 +1364,9 @@ class App(tk.Tk):
             self.var_out.set(d.get("out", ""))
             self.var_maxwords.set(int(d.get("maxwords", 0)))
             for k, v in (("brackets", self.v_brackets), ("labels", self.v_labels), ("lines", self.v_lines),
-                         ("zero", self.v_zero), ("cuts", self.v_cuts), ("prime", self.v_prime), ("unheard", self.v_unheard),
+                         # "premiere", not the old "zero": that was on by default for everyone, so a saved
+                         # "zero": true says nothing about the user editing in Premiere
+                         ("premiere", self.v_zero), ("footnotes", self.v_footnotes), ("cuts", self.v_cuts), ("prime", self.v_prime), ("unheard", self.v_unheard),
                          ("cache", self.v_cache), ("words", self.v_words)):
                 if k in d:
                     v.set(bool(d[k]))
